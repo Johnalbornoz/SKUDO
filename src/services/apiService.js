@@ -42,11 +42,21 @@ async function http(url, options = {}) {
 // ── Autenticación ─────────────────────────────────────────────────────────
 
 export async function login(email, password) {
-  const res = await fetch(`${API_URL}/auth/login`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+ // const res = await fetch(`${API_URL}/auth/login`, {
+ //   method: 'POST',
+  //  headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
     body: JSON.stringify({ email, password }),
-  });
+ // });
+
+// REEMPLÁZALO POR ESTO (URL ABSOLUTA):
+const response = await fetch('https://skudo.onrender.com/api/auth/login', {
+  method: 'POST',
+  headers: {
+    'Content-Type': 'application/json',
+  },
+  body: JSON.stringify({ email, password }),
+});
+
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
     throw new Error(body.error || 'Credenciales incorrectas');
