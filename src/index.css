@@ -1,0 +1,81 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Outfit:wght@400;500;600;700&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Outfit", sans-serif;
+  --font-mono: "JetBrains Mono", monospace;
+
+  /* Brand Colors */
+  --color-brand-yellow-start: #EBB90C;
+  --color-brand-yellow-end: #BC6815;
+  --color-brand-silver: #BEBEBE;
+  --color-brand-green: #10B981;
+  --color-brand-green-light: #00F1AC;
+  --color-brand-green-dark: #168C6B;
+  --color-brand-blue: #3B82F6;
+  --color-brand-blue-light: #60A5FA;
+  --color-brand-blue-dark: #2D3748;
+
+  /* Semantic Colors */
+  --color-success: #10B981;
+  --color-warning: #F59E0B;
+  --color-danger: #EF4444;
+  --color-info: #3B82F6;
+
+  /* Status Colors */
+  --color-status-critical: #DC2626;
+  --color-status-high: #FF6B35;
+  --color-status-medium: #F59E0B;
+  --color-status-low: #10B981;
+
+  /* Neutral Scale */
+  --color-gray-50: #F9FAFB;
+  --color-gray-100: #F3F4F6;
+  --color-gray-200: #E5E7EB;
+  --color-gray-300: #D1D5DB;
+  --color-gray-400: #9CA3AF;
+  --color-gray-500: #6B7280;
+  --color-gray-600: #4B5563;
+  --color-gray-700: #374151;
+  --color-gray-800: #1F2937;
+  --color-gray-900: #111827;
+
+  /* Surface Colors */
+  --color-surface-bg: #F7F9FB;
+  --color-surface-card: #FFFFFF;
+}
+
+@layer base {
+  body {
+    @apply bg-surface-bg text-gray-900 font-sans antialiased;
+  }
+  
+  h1 { @apply text-[36px] font-bold leading-[1.2] font-display; }
+  h2 { @apply text-[30px] font-semibold leading-[1.3] font-display; }
+  h3 { @apply text-[24px] font-semibold leading-[1.4] font-display; }
+  h4 { @apply text-[18px] font-medium leading-[1.5] font-display; }
+}
+
+.artisanal-card {
+  @apply relative overflow-hidden bg-surface-card border border-gray-200 rounded-2xl p-6 transition-all duration-300 hover:shadow-xl hover:border-brand-green/30;
+}
+
+.artisanal-card::before {
+  content: '';
+  @apply absolute -top-12 -right-12 w-32 h-32 rounded-full opacity-5 blur-3xl transition-all duration-500;
+}
+
+.card-blue::before { @apply bg-brand-blue; }
+.card-emerald::before { @apply bg-brand-green; }
+.card-amber::before { @apply bg-warning; }
+.card-slate::before { @apply bg-gray-500; }
+
+.sidebar-item {
+  @apply flex items-center gap-3 px-4 py-3 rounded-lg text-gray-600 transition-all duration-200 hover:bg-gray-50 hover:text-gray-900;
+}
+
+.sidebar-item-active {
+  @apply bg-brand-green/10 text-brand-green font-medium;
+}
+

@@ -1,0 +1,7 @@
+{
+  "name": "Remix: Skudo - PSM Diagnosis Expert",
+  "description": "Consultoría Senior en Seguridad de Procesos (PSM) bajo metodología CCPS y marco legal colombiano.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
