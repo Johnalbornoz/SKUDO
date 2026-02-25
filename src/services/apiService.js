@@ -1,7 +1,5 @@
-// Conexión directa a Render en producción
-export const API_BASE_URL = import.meta.env.PROD
-  ? 'https://skudo.onrender.com/api'
-  : 'http://localhost:3000/api';
+const API_URL = import.meta.env.PROD ? 'https://skudo.onrender.com/api' : 'http://localhost:3000/api';
+export { API_URL as API_BASE_URL }; // Alias para componentes que lo importan
 
 // ── Auth helpers ──────────────────────────────────────────────────────────
 
@@ -44,7 +42,7 @@ async function http(url, options = {}) {
 // ── Autenticación ─────────────────────────────────────────────────────────
 
 export async function login(email, password) {
-  const res = await fetch(`${API_BASE_URL}/auth/login`, {
+  const res = await fetch(`${API_URL}/auth/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
     body: JSON.stringify({ email, password }),
@@ -57,217 +55,217 @@ export async function login(email, password) {
 }
 
 export async function fetchMe() {
-  return http(`${API_BASE_URL}/auth/me`);
+  return http(`${API_URL}/auth/me`);
 }
 
 // ── Configuración ─────────────────────────────────────────────────────────
 
 export async function fetchConfig() {
-  return http(`${API_BASE_URL}/config`);
+  return http(`${API_URL}/config`);
 }
 
 export async function saveConfig(data) {
-  return http(`${API_BASE_URL}/config`, {
+  return http(`${API_URL}/config`, {
     method: 'POST',
     body: JSON.stringify(data),
   });
 }
 
 export async function testDatabaseConnection() {
-  return http(`${API_BASE_URL}/test-db`);
+  return http(`${API_URL}/test-db`);
 }
 
 // ── Preguntas CRUD ────────────────────────────────────────────────────────
 
 export async function fetchPreguntas(search = '') {
   const url = search
-    ? `${API_BASE_URL}/preguntas?search=${encodeURIComponent(search)}`
-    : `${API_BASE_URL}/preguntas`;
+    ? `${API_URL}/preguntas?search=${encodeURIComponent(search)}`
+    : `${API_URL}/preguntas`;
   return http(url);
 }
 
 export async function fetchPregunta(id) {
-  return http(`${API_BASE_URL}/preguntas/${id}`);
+  return http(`${API_URL}/preguntas/${id}`);
 }
 
 export async function createPregunta(data) {
-  return http(`${API_BASE_URL}/preguntas`, {
+  return http(`${API_URL}/preguntas`, {
     method: 'POST',
     body: JSON.stringify(data),
   });
 }
 
 export async function updatePregunta(id, data) {
-  return http(`${API_BASE_URL}/preguntas/${id}`, {
+  return http(`${API_URL}/preguntas/${id}`, {
     method: 'PUT',
     body: JSON.stringify(data),
   });
 }
 
 export async function deletePregunta(id) {
-  return http(`${API_BASE_URL}/preguntas/${id}`, { method: 'DELETE' });
+  return http(`${API_URL}/preguntas/${id}`, { method: 'DELETE' });
 }
 
 // ── Tenants ───────────────────────────────────────────────────────────────
 
 export async function fetchTenants() {
-  return http(`${API_BASE_URL}/tenants`);
+  return http(`${API_URL}/tenants`);
 }
 
 export async function createTenant(data) {
-  return http(`${API_BASE_URL}/tenants`, { method: 'POST', body: JSON.stringify(data) });
+  return http(`${API_URL}/tenants`, { method: 'POST', body: JSON.stringify(data) });
 }
 
 export async function updateTenant(id, data) {
-  return http(`${API_BASE_URL}/tenants/${id}`, { method: 'PUT', body: JSON.stringify(data) });
+  return http(`${API_URL}/tenants/${id}`, { method: 'PUT', body: JSON.stringify(data) });
 }
 
 // ── Plantas ───────────────────────────────────────────────────────────────
 
 export async function fetchPlantas() {
-  return http(`${API_BASE_URL}/plantas`);
+  return http(`${API_URL}/plantas`);
 }
 
 export async function createPlanta(data) {
-  return http(`${API_BASE_URL}/plantas`, { method: 'POST', body: JSON.stringify(data) });
+  return http(`${API_URL}/plantas`, { method: 'POST', body: JSON.stringify(data) });
 }
 
 export async function updatePlanta(id, data) {
-  return http(`${API_BASE_URL}/plantas/${id}`, { method: 'PUT', body: JSON.stringify(data) });
+  return http(`${API_URL}/plantas/${id}`, { method: 'PUT', body: JSON.stringify(data) });
 }
 
 export async function deletePlanta(id) {
-  return http(`${API_BASE_URL}/plantas/${id}`, { method: 'DELETE' });
+  return http(`${API_URL}/plantas/${id}`, { method: 'DELETE' });
 }
 
 // ── Áreas ─────────────────────────────────────────────────────────────────
 
 export async function fetchAreas(planta_id) {
   const url = planta_id
-    ? `${API_BASE_URL}/areas?planta_id=${planta_id}`
-    : `${API_BASE_URL}/areas`;
+    ? `${API_URL}/areas?planta_id=${planta_id}`
+    : `${API_URL}/areas`;
   return http(url);
 }
 
 export async function createArea(data) {
-  return http(`${API_BASE_URL}/areas`, { method: 'POST', body: JSON.stringify(data) });
+  return http(`${API_URL}/areas`, { method: 'POST', body: JSON.stringify(data) });
 }
 
 export async function updateArea(id, data) {
-  return http(`${API_BASE_URL}/areas/${id}`, { method: 'PUT', body: JSON.stringify(data) });
+  return http(`${API_URL}/areas/${id}`, { method: 'PUT', body: JSON.stringify(data) });
 }
 
 export async function deleteArea(id) {
-  return http(`${API_BASE_URL}/areas/${id}`, { method: 'DELETE' });
+  return http(`${API_URL}/areas/${id}`, { method: 'DELETE' });
 }
 
 // ── Usuarios ──────────────────────────────────────────────────────────────
 
 export async function fetchUsuarios() {
-  return http(`${API_BASE_URL}/usuarios`);
+  return http(`${API_URL}/usuarios`);
 }
 
 export async function createUsuario(data) {
-  return http(`${API_BASE_URL}/usuarios`, { method: 'POST', body: JSON.stringify(data) });
+  return http(`${API_URL}/usuarios`, { method: 'POST', body: JSON.stringify(data) });
 }
 
 export async function updateUsuario(id, data) {
-  return http(`${API_BASE_URL}/usuarios/${id}`, { method: 'PUT', body: JSON.stringify(data) });
+  return http(`${API_URL}/usuarios/${id}`, { method: 'PUT', body: JSON.stringify(data) });
 }
 
 // ── Diagnósticos ──────────────────────────────────────────────────────────
 
 export async function fetchDiagnosticos(estado) {
   const url = estado
-    ? `${API_BASE_URL}/diagnosticos?estado=${encodeURIComponent(estado)}`
-    : `${API_BASE_URL}/diagnosticos`;
+    ? `${API_URL}/diagnosticos?estado=${encodeURIComponent(estado)}`
+    : `${API_URL}/diagnosticos`;
   return http(url);
 }
 
 export async function fetchDiagnostico(id) {
-  return http(`${API_BASE_URL}/diagnosticos/${id}`);
+  return http(`${API_URL}/diagnosticos/${id}`);
 }
 
 export async function createDiagnostico(data) {
-  return http(`${API_BASE_URL}/diagnosticos`, { method: 'POST', body: JSON.stringify(data) });
+  return http(`${API_URL}/diagnosticos`, { method: 'POST', body: JSON.stringify(data) });
 }
 
 export async function updateDiagnostico(id, data) {
-  return http(`${API_BASE_URL}/diagnosticos/${id}`, { method: 'PUT', body: JSON.stringify(data) });
+  return http(`${API_URL}/diagnosticos/${id}`, { method: 'PUT', body: JSON.stringify(data) });
 }
 
 export async function validarDiagnostico(id, hallazgos_validados) {
-  return http(`${API_BASE_URL}/diagnosticos/${id}/validar`, {
+  return http(`${API_URL}/diagnosticos/${id}/validar`, {
     method: 'PUT',
     body: JSON.stringify({ hallazgos_validados }),
   });
 }
 
 export async function deleteUsuario(id) {
-  return http(`${API_BASE_URL}/usuarios/${id}`, { method: 'DELETE' });
+  return http(`${API_URL}/usuarios/${id}`, { method: 'DELETE' });
 }
 
 export async function changePassword(password_actual, password_nuevo) {
-  return http(`${API_BASE_URL}/auth/me/password`, {
+  return http(`${API_URL}/auth/me/password`, {
     method: 'PUT',
     body: JSON.stringify({ password_actual, password_nuevo }),
   });
 }
 
 export async function fetchHierarchy() {
-  return http(`${API_BASE_URL}/setup/hierarchy`);
+  return http(`${API_URL}/setup/hierarchy`);
 }
 
 export async function fetchEntrevistas(diagId) {
-  return http(`${API_BASE_URL}/diagnosticos/${diagId}/entrevistas`);
+  return http(`${API_URL}/diagnosticos/${diagId}/entrevistas`);
 }
 export async function crearEntrevista(diagId, data) {
-  return http(`${API_BASE_URL}/diagnosticos/${diagId}/entrevistas`, { method: 'POST', body: JSON.stringify(data) });
+  return http(`${API_URL}/diagnosticos/${diagId}/entrevistas`, { method: 'POST', body: JSON.stringify(data) });
 }
 export async function analizarEntrevista(diagId, entId) {
-  return http(`${API_BASE_URL}/diagnosticos/${diagId}/entrevistas/${entId}/analizar`, { method: 'POST' });
+  return http(`${API_URL}/diagnosticos/${diagId}/entrevistas/${entId}/analizar`, { method: 'POST' });
 }
 export async function triangularDiagnostico(diagId) {
-  return http(`${API_BASE_URL}/diagnosticos/${diagId}/triangular`, { method: 'POST' });
+  return http(`${API_URL}/diagnosticos/${diagId}/triangular`, { method: 'POST' });
 }
 
 export async function fetchDocumentos(diagId) {
-  return http(`${API_BASE_URL}/diagnosticos/${diagId}/documentos`);
+  return http(`${API_URL}/diagnosticos/${diagId}/documentos`);
 }
 
 export async function analizarDocumento(diagId, docId) {
-  return http(`${API_BASE_URL}/diagnosticos/${diagId}/documentos/${docId}/analizar`, { method: 'POST' });
+  return http(`${API_URL}/diagnosticos/${diagId}/documentos/${docId}/analizar`, { method: 'POST' });
 }
 
 export async function eliminarDocumento(diagId, docId) {
-  return http(`${API_BASE_URL}/diagnosticos/${diagId}/documentos/${docId}`, { method: 'DELETE' });
+  return http(`${API_URL}/diagnosticos/${diagId}/documentos/${docId}`, { method: 'DELETE' });
 }
 
 export async function fetchPrecalificacion(diagId) {
-  return http(`${API_BASE_URL}/diagnosticos/${diagId}/precalificacion`);
+  return http(`${API_URL}/diagnosticos/${diagId}/precalificacion`);
 }
 
 export async function deleteDiagnostico(id) {
-  return http(`${API_BASE_URL}/diagnosticos/${id}`, { method: 'DELETE' });
+  return http(`${API_URL}/diagnosticos/${id}`, { method: 'DELETE' });
 }
 
 export async function fetchPreguntasDiagnostico(diagId) {
-  return http(`${API_BASE_URL}/diagnosticos/${diagId}/preguntas`);
+  return http(`${API_URL}/diagnosticos/${diagId}/preguntas`);
 }
 
 export async function responderPregunta(diagId, preguntaId, respuesta, comentario) {
-  return http(`${API_BASE_URL}/diagnosticos/${diagId}/respuestas/${preguntaId}`, {
+  return http(`${API_URL}/diagnosticos/${diagId}/respuestas/${preguntaId}`, {
     method: 'PATCH',
     body: JSON.stringify({ respuesta, comentario }),
   });
 }
 
 export async function fetchPreguntasParaIA(diagId) {
-  return http(`${API_BASE_URL}/diagnosticos/${diagId}/preguntas-para-ia`);
+  return http(`${API_URL}/diagnosticos/${diagId}/preguntas-para-ia`);
 }
 
 export async function patchProgreso(id, data) {
-  return http(`${API_BASE_URL}/diagnosticos/${id}/progreso`, {
+  return http(`${API_URL}/diagnosticos/${id}/progreso`, {
     method: 'PATCH',
     body: JSON.stringify(data),
   });
@@ -276,25 +274,25 @@ export async function patchProgreso(id, data) {
 // ── Recorrido / Captura Sensorial de Campo ────────────────────────────────────
 
 export async function fetchNotasCampo(diagId) {
-  return http(`${API_BASE_URL}/diagnosticos/${diagId}/recorrido`);
+  return http(`${API_URL}/diagnosticos/${diagId}/recorrido`);
 }
 
 export async function crearNotaCampo(diagId, data) {
-  return http(`${API_BASE_URL}/diagnosticos/${diagId}/recorrido`, {
+  return http(`${API_URL}/diagnosticos/${diagId}/recorrido`, {
     method: 'POST',
     body: JSON.stringify(data),
   });
 }
 
 export async function actualizarNotaCampo(diagId, itemId, data) {
-  return http(`${API_BASE_URL}/diagnosticos/${diagId}/recorrido/${itemId}`, {
+  return http(`${API_URL}/diagnosticos/${diagId}/recorrido/${itemId}`, {
     method: 'PATCH',
     body: JSON.stringify(data),
   });
 }
 
 export async function eliminarNotaCampo(diagId, itemId) {
-  return http(`${API_BASE_URL}/diagnosticos/${diagId}/recorrido/${itemId}`, {
+  return http(`${API_URL}/diagnosticos/${diagId}/recorrido/${itemId}`, {
     method: 'DELETE',
   });
 }
@@ -303,7 +301,7 @@ export async function subirFotoCampo(diagId, itemId, file) {
   const token = localStorage.getItem('skudo_token');
   const form  = new FormData();
   form.append('foto', file);
-  const res = await fetch(`${API_BASE_URL}/diagnosticos/${diagId}/recorrido/${itemId}/foto`, {
+  const res = await fetch(`${API_URL}/diagnosticos/${diagId}/recorrido/${itemId}/foto`, {
     method: 'POST',
     headers: token ? { Authorization: `Bearer ${token}` } : {},
     body: form,
@@ -313,19 +311,19 @@ export async function subirFotoCampo(diagId, itemId, file) {
 }
 
 export async function analizarNotaCampo(diagId, itemId) {
-  return http(`${API_BASE_URL}/diagnosticos/${diagId}/recorrido/${itemId}/analizar`, {
+  return http(`${API_URL}/diagnosticos/${diagId}/recorrido/${itemId}/analizar`, {
     method: 'POST',
   });
 }
 
 export async function triangularCampo(diagId) {
-  return http(`${API_BASE_URL}/diagnosticos/${diagId}/recorrido/triangular`, {
+  return http(`${API_URL}/diagnosticos/${diagId}/recorrido/triangular`, {
     method: 'POST',
   });
 }
 
 export async function setupDiagnostico(data) {
-  return http(`${API_BASE_URL}/diagnosticos/setup`, {
+  return http(`${API_URL}/diagnosticos/setup`, {
     method: 'POST',
     body: JSON.stringify(data),
   });
