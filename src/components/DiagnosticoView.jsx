@@ -17,7 +17,7 @@ import NavegacionFases from './NavegacionFases';
 
 // ─── Constantes ───────────────────────────────────────────────────────────────
 
-const API_URL = import.meta.env.VITE_API_BASE_URL || (import.meta.env.PROD ? '/api' : 'http://localhost:3000/api');
+const API_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3000/api';
 
 const OPCIONES_RESPUESTA = [
   { value: 'Suficiente',    label: 'Suficiente',    color: 'bg-green-100 text-green-700  border-green-300' },

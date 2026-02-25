@@ -19,7 +19,7 @@ import { useAuth } from '../contexts/AuthContext';
 import apiService from '../services/apiService';
 import NavegacionFases from './NavegacionFases';
 
-const API_URL = import.meta.env.VITE_API_BASE_URL || (import.meta.env.PROD ? '/api' : 'http://localhost:3000/api');
+const API_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3000/api';
 const SERVER_BASE = import.meta.env.VITE_SERVER_BASE_URL || (import.meta.env.PROD ? '' : 'http://localhost:3000');
 
 // ─── Constantes ───────────────────────────────────────────────────────────────
