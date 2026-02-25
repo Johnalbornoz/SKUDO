@@ -77,18 +77,34 @@ async function geminiAnalizar(prompt) {
   return result.response.text();
 }
 
+const cors = require('cors');
+
+// Lista de dominios permitidos
+const allowedOrigins = [
+  'https://skudo.vercel.app',            // Tu dominio principal de producción
+  'http://localhost:5173',               // Tu entorno local de Vite
+  'http://localhost:3000'                // Tu puerto de backend local
+];
+
 app.use(cors({
-  origin: [
-    'http://localhost:5173',
-    'https://skudo.vercel.app', // Tu URL principal
-    'https://skudo-kezzjadl8-jalbornoz.vercel.app' // Tu URL de desarrollo
-  ],
+  origin: function (origin, callback) {
+    // Permitir peticiones sin origen (como Postman o apps móviles)
+    if (!origin) return callback(null, true);
+    
+    if (allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      console.log("Origen bloqueado por CORS:", origin);
+      callback(new Error('No permitido por CORS'));
+    }
+  },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
-app.use(express.json());
 
+// Importante: Asegúrate de que esto esté ANTES de tus rutas
+app.use(express.json());
 // ─── JWT Middleware ────────────────────────────────────────────────────────
 
 function verificarToken(req, res, next) {
