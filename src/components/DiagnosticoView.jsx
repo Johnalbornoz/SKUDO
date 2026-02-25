@@ -11,13 +11,12 @@ import {
   BookOpen, Info, AlertTriangle, Lock, RefreshCw,
   FileText, Target,
 } from 'lucide-react';
-import apiService from '../services/apiService';
+import apiService, { API_BASE_URL } from '../services/apiService';
 import { useAuth } from '../contexts/AuthContext';
 import NavegacionFases from './NavegacionFases';
 
 // ─── Constantes ───────────────────────────────────────────────────────────────
 
-const API_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3000/api';
 
 const OPCIONES_RESPUESTA = [
   { value: 'Suficiente',    label: 'Suficiente',    color: 'bg-green-100 text-green-700  border-green-300' },
@@ -218,7 +217,7 @@ export default function DiagnosticoView({ diagnosticoId, faseActual = 2, onNaveg
     setErrorMsg('');
     try {
       const res = await fetch(
-        `${API_URL}/diagnosticos/${diagnosticoId}/preguntas`,
+        `${API_BASE_URL}/diagnosticos/${diagnosticoId}/preguntas`,
         { headers: { Authorization: `Bearer ${localStorage.getItem('skudo_token')}` } }
       );
       if (!res.ok) throw new Error(`Error ${res.status}`);
@@ -236,7 +235,7 @@ export default function DiagnosticoView({ diagnosticoId, faseActual = 2, onNaveg
     setSaving(true);
     try {
       await fetch(
-        `${API_URL}/diagnosticos/${diagnosticoId}/respuestas/${preguntaId}`,
+        `${API_BASE_URL}/diagnosticos/${diagnosticoId}/respuestas/${preguntaId}`,
         {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${localStorage.getItem('skudo_token')}` },

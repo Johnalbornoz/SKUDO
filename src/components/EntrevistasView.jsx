@@ -17,10 +17,9 @@ import {
   ShieldAlert, Info,
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
-import apiService from '../services/apiService';
+import apiService, { API_BASE_URL } from '../services/apiService';
 import NavegacionFases from './NavegacionFases';
 
-const API_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3000/api';
 
 // ─── Roles críticos PSM (según listado de documentos) ─────────────────────────────
 
@@ -361,16 +360,16 @@ function ModalGrabacion({ diagnosticoId, entrevistaInicial, onGuardado, onCerrar
 
   useEffect(() => {
     if (!diagnosticoId) return;
-    fetch(`${API_URL}/diagnosticos/${diagnosticoId}`, { headers: hdr() })
+    fetch(`${API_BASE_URL}/diagnosticos/${diagnosticoId}`, { headers: hdr() })
       .then(r => r.json())
       .then(diag => {
         if (diag?.planta_id) {
-          fetch(`${API_URL}/areas?planta_id=${diag.planta_id}`, { headers: hdr() })
+          fetch(`${API_BASE_URL}/areas?planta_id=${diag.planta_id}`, { headers: hdr() })
             .then(r => r.json())
             .then(arr => setAreas(Array.isArray(arr) ? arr : []))
             .catch(() => setAreas([]));
         } else {
-          fetch(`${API_URL}/areas`, { headers: hdr() })
+          fetch(`${API_BASE_URL}/areas`, { headers: hdr() })
             .then(r => r.json())
             .then(arr => setAreas(Array.isArray(arr) ? arr : []))
             .catch(() => setAreas([]));
@@ -418,7 +417,7 @@ function ModalGrabacion({ diagnosticoId, entrevistaInicial, onGuardado, onCerrar
     try {
       const fd = new FormData();
       fd.append('audio', blob, 'grabacion.webm');
-      const res = await fetch(`${API_URL}/diagnosticos/${diagnosticoId}/transcribir`, {
+      const res = await fetch(`${API_BASE_URL}/diagnosticos/${diagnosticoId}/transcribir`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${token()}` },
         body: fd,
@@ -441,14 +440,14 @@ function ModalGrabacion({ diagnosticoId, entrevistaInicial, onGuardado, onCerrar
     try {
       const body = { participante: nombre, cargo: cargoFinal, area_id: areaId ? Number(areaId) : null, transcripcion, duracion_seg: tiempo, notas_consultor: notasConsultor || null };
       if (entrevistaInicial) {
-        await fetch(`${API_URL}/diagnosticos/${diagnosticoId}/entrevistas/${entrevistaInicial.id}`, {
+        await fetch(`${API_BASE_URL}/diagnosticos/${diagnosticoId}/entrevistas/${entrevistaInicial.id}`, {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json', ...hdr() },
           body: JSON.stringify(body),
         });
         onGuardado({ ...entrevistaInicial, ...body });
       } else {
-        const res = await fetch(`${API_URL}/diagnosticos/${diagnosticoId}/entrevistas`, {
+        const res = await fetch(`${API_BASE_URL}/diagnosticos/${diagnosticoId}/entrevistas`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', ...hdr() },
           body: JSON.stringify(body),
@@ -1043,8 +1042,8 @@ export default function EntrevistasView({ diagnosticoId, faseActual = 5, onNaveg
     setLoading(true);
     try {
       const [ents, diag] = await Promise.all([
-        fetch(`${API_URL}/diagnosticos/${diagnosticoId}/entrevistas`, { headers: hdr() }).then(r => r.json()),
-        fetch(`${API_URL}/diagnosticos/${diagnosticoId}`,             { headers: hdr() }).then(r => r.json()),
+        fetch(`${API_BASE_URL}/diagnosticos/${diagnosticoId}/entrevistas`, { headers: hdr() }).then(r => r.json()),
+        fetch(`${API_BASE_URL}/diagnosticos/${diagnosticoId}`,             { headers: hdr() }).then(r => r.json()),
       ]);
       setEntrevistas(Array.isArray(ents) ? ents : []);
       setDiagEstado(diag?.estado ?? null);
@@ -1064,7 +1063,7 @@ export default function EntrevistasView({ diagnosticoId, faseActual = 5, onNaveg
   async function handleAnalizar(entId) {
     setAnalizando(entId);
     try {
-      const res  = await fetch(`${API_URL}/diagnosticos/${diagnosticoId}/entrevistas/${entId}/analizar`, {
+      const res  = await fetch(`${API_BASE_URL}/diagnosticos/${diagnosticoId}/entrevistas/${entId}/analizar`, {
         method: 'POST', headers: hdr(),
       });
       const data = await res.json();
@@ -1097,7 +1096,7 @@ export default function EntrevistasView({ diagnosticoId, faseActual = 5, onNaveg
   }
 
   async function handleEliminar(entId) {
-    await fetch(`${API_URL}/diagnosticos/${diagnosticoId}/entrevistas/${entId}`, { method: 'DELETE', headers: hdr() });
+    await fetch(`${API_BASE_URL}/diagnosticos/${diagnosticoId}/entrevistas/${entId}`, { method: 'DELETE', headers: hdr() });
     setEntrevistas(prev => prev.filter(e => e.id !== entId));
   }
 
@@ -1105,7 +1104,7 @@ export default function EntrevistasView({ diagnosticoId, faseActual = 5, onNaveg
     setTriangulando(true);
     setResultTriang(null);
     try {
-      const res  = await fetch(`${API_URL}/diagnosticos/${diagnosticoId}/triangular`, { method: 'POST', headers: hdr() });
+      const res  = await fetch(`${API_BASE_URL}/diagnosticos/${diagnosticoId}/triangular`, { method: 'POST', headers: hdr() });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error);
       setResultTriang(data);

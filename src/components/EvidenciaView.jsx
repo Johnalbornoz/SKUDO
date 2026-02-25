@@ -11,10 +11,9 @@ import {
   FolderOpen, Lock, ArrowRight, Eye, Loader2,
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
-import apiService from '../services/apiService';
+import apiService, { API_BASE_URL } from '../services/apiService';
 import NavegacionFases from './NavegacionFases';
 
-const API_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3000/api';
 
 // ─── Configuración de categorías PSM ─────────────────────────────────────────
 
@@ -281,8 +280,8 @@ export default function EvidenciaView({ diagnosticoId, faseActual = 3, onNavegar
     setLoading(true);
     try {
       const [docsRes, diagRes] = await Promise.all([
-        fetch(`${API_URL}/diagnosticos/${diagnosticoId}/documentos`, { headers: hdr() }).then(r => r.json()),
-        fetch(`${API_URL}/diagnosticos/${diagnosticoId}`,            { headers: hdr() }).then(r => r.json()),
+        fetch(`${API_BASE_URL}/diagnosticos/${diagnosticoId}/documentos`, { headers: hdr() }).then(r => r.json()),
+        fetch(`${API_BASE_URL}/diagnosticos/${diagnosticoId}`,            { headers: hdr() }).then(r => r.json()),
       ]);
       setDocs(docsRes.documentos ?? []);
       setCategorias(docsRes.categorias ?? CATEGORIAS_PSM.map(c => c.id));
@@ -299,7 +298,7 @@ export default function EvidenciaView({ diagnosticoId, faseActual = 3, onNavegar
     fd.append('categoria', categoria);
     for (const f of files) fd.append('archivos', f);
     try {
-      const res = await fetch(`${API_URL}/diagnosticos/${diagnosticoId}/documentos`, {
+      const res = await fetch(`${API_BASE_URL}/diagnosticos/${diagnosticoId}/documentos`, {
         method: 'POST',
         headers: hdr(),
         body: fd,
@@ -318,7 +317,7 @@ export default function EvidenciaView({ diagnosticoId, faseActual = 3, onNavegar
     setAnalizando(docId);
     setDocs(prev => prev.map(d => d.id === docId ? { ...d, estado: 'Procesando' } : d));
     try {
-      const res = await fetch(`${API_URL}/diagnosticos/${diagnosticoId}/documentos/${docId}/analizar`, {
+      const res = await fetch(`${API_BASE_URL}/diagnosticos/${diagnosticoId}/documentos/${docId}/analizar`, {
         method: 'POST',
         headers: hdr(),
       });
@@ -341,7 +340,7 @@ export default function EvidenciaView({ diagnosticoId, faseActual = 3, onNavegar
   }
 
   async function handleEliminar(docId) {
-    await fetch(`${API_URL}/diagnosticos/${diagnosticoId}/documentos/${docId}`, {
+    await fetch(`${API_BASE_URL}/diagnosticos/${diagnosticoId}/documentos/${docId}`, {
       method: 'DELETE', headers: hdr(),
     });
     setDocs(prev => prev.filter(d => d.id !== docId));
@@ -350,7 +349,7 @@ export default function EvidenciaView({ diagnosticoId, faseActual = 3, onNavegar
   async function handleExportarJSON() {
     setExportando(true);
     try {
-      const res  = await fetch(`${API_URL}/diagnosticos/${diagnosticoId}/precalificacion`, { headers: hdr() });
+      const res  = await fetch(`${API_BASE_URL}/diagnosticos/${diagnosticoId}/precalificacion`, { headers: hdr() });
       const json = await res.json();
       const blob = new Blob([JSON.stringify(json, null, 2)], { type: 'application/json' });
       const url  = URL.createObjectURL(blob);

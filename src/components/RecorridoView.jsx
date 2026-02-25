@@ -16,11 +16,10 @@ import {
   AlertCircle, ZapOff, Shield, TrendingDown, Eye, Image,
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
-import apiService from '../services/apiService';
+import apiService, { API_BASE_URL } from '../services/apiService';
 import NavegacionFases from './NavegacionFases';
 
-const API_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3000/api';
-const SERVER_BASE = import.meta.env.VITE_SERVER_BASE_URL || (import.meta.env.PROD ? '' : 'http://localhost:3000');
+const SERVER_BASE = import.meta.env.PROD ? 'https://skudo.onrender.com' : 'http://localhost:3000';
 
 // ─── Constantes ───────────────────────────────────────────────────────────────
 
@@ -561,7 +560,7 @@ export default function RecorridoView({ diagnosticoId, faseActual = 4, onNavegar
     try {
       const [notas, diag] = await Promise.all([
         apiService.fetchNotasCampo(diagnosticoId),
-        fetch(`${API_URL}/diagnosticos/${diagnosticoId}`, {
+        fetch(`${API_BASE_URL}/diagnosticos/${diagnosticoId}`, {
           headers: { Authorization: `Bearer ${localStorage.getItem('skudo_token')}` },
         }).then(r => r.json()),
       ]);
