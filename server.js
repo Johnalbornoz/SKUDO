@@ -80,9 +80,12 @@ async function geminiAnalizar(prompt) {
 app.use(cors({
   origin: [
     'http://localhost:5173',
-    'https://skudo-kezzjadl8-jalbornoz.vercel.app',
+    'https://skudo.vercel.app', // Tu URL principal
+    'https://skudo-kezzjadl8-jalbornoz.vercel.app' // Tu URL de desarrollo
   ],
   credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
 }));
 app.use(express.json());
 
