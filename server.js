@@ -107,6 +107,9 @@ async function enviarEmailNotificacion({ to, nombre, accion, fecha_limite, diasR
 }
 
 const JWT_SECRET = process.env.JWT_SECRET || 'skudo-dev-secret-changeme';
+if (!process.env.JWT_SECRET) {
+  console.warn('[AUTH] JWT_SECRET no definido en .env; usando valor por defecto solo para desarrollo.');
+}
 
 const app = express();
 
@@ -196,6 +199,13 @@ app.use(cors({
 // Límites de datos altos para triangulación y payloads grandes (evitar bloqueo del fetch)
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
+
+// Log de cada petición entrante (rastreo de flujo)
+app.use((req, res, next) => {
+  console.log(`${req.method} ${req.url}`);
+  next();
+});
+
 // ─── JWT Middleware ────────────────────────────────────────────────────────
 
 function verificarToken(req, res, next) {
@@ -232,8 +242,28 @@ function tenantScope(req) {
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false },
+  ssl: { rejectUnauthorized: false }, // Necesario para Neon y otros Postgres con SSL
 });
+
+/** Verifica que las tablas principales existan antes de aceptar tráfico (evita 500 por tablas faltantes). */
+async function ensureMainTablesExist() {
+  const required = ['usuarios', 'diagnosticos', 'plan_accion_items'];
+  const client = await pool.connect();
+  try {
+    for (const table of required) {
+      const { rows } = await client.query(
+        `SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = $1`,
+        [table]
+      );
+      if (rows.length === 0) {
+        throw new Error(`Tabla requerida "${table}" no existe. Ejecute: npm run migrate`);
+      }
+    }
+    console.log('[setup] Tablas principales verificadas: usuarios, diagnosticos, plan_accion_items');
+  } finally {
+    client.release();
+  }
+}
 
 async function ensureTable() {
   const client = await pool.connect();
@@ -465,17 +495,26 @@ app.delete('/api/preguntas/:id', async (req, res) => {
 
 // POST /api/auth/login
 app.post('/api/auth/login', async (req, res) => {
-  const { email, password } = req.body || {};
+  const { email: rawEmail, password } = req.body || {};
+  const email = typeof rawEmail === 'string' ? rawEmail.toLowerCase().trim() : '';
   if (!email || !password) {
     return res.status(400).json({ error: 'Email y contraseña requeridos' });
   }
   try {
     const { rows } = await pool.query(
-      'SELECT * FROM usuarios WHERE email = $1 AND activo = true',
-      [email.toLowerCase().trim()]
+      'SELECT id, email, nombre, rol, tenant_id, password_hash FROM usuarios WHERE email = $1 AND activo = true',
+      [email]
     );
     const user = rows[0];
-    if (!user || !(await bcrypt.compare(password, user.password_hash))) {
+    // Log de depuración seguro (nunca imprimir contraseña)
+    if (!user) {
+      console.log('[LOGIN] Usuario encontrado: no');
+      return res.status(401).json({ error: 'Credenciales incorrectas' });
+    }
+    console.log('[LOGIN] Usuario encontrado: si');
+    const hashOk = await bcrypt.compare(password, user.password_hash);
+    console.log('[LOGIN] Comparación de hash: ' + (hashOk ? 'exitosa' : 'fallida'));
+    if (!hashOk) {
       return res.status(401).json({ error: 'Credenciales incorrectas' });
     }
     const payload = {
@@ -1039,7 +1078,10 @@ app.get('/api/diagnosticos', verificarToken, async (req, res) => {
     q += ' ORDER BY d.created_at DESC';
     const { rows } = await pool.query(q, params);
     res.json(rows);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    console.error('ERROR EN [/api/diagnosticos]:', err.message);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.get('/api/diagnosticos/:id', verificarToken, async (req, res) => {
@@ -1049,7 +1091,10 @@ app.get('/api/diagnosticos/:id', verificarToken, async (req, res) => {
     );
     if (!rows[0]) return res.status(404).json({ error: 'No encontrado' });
     res.json(rows[0]);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    console.error('ERROR EN [/api/diagnosticos/:id]:', err.message);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.post('/api/diagnosticos', verificarToken, async (req, res) => {
@@ -1067,7 +1112,10 @@ app.post('/api/diagnosticos', verificarToken, async (req, res) => {
       ]
     );
     res.status(201).json(rows[0]);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    console.error('ERROR EN [POST /api/diagnosticos]:', err.message);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.put('/api/diagnosticos/:id', verificarToken, async (req, res) => {
@@ -2467,7 +2515,7 @@ app.post('/api/diagnosticos/:id/validate-fase5', verificarToken, async (req, res
     override_justificacion,
     evidencias_citadas 
   } = req.body;
-  const validadorId = req.user.id;
+  const validadorId = req.usuario.id;
 
   try {
     // Obtener calificación de IA existente
@@ -2952,7 +3000,7 @@ app.get('/api/diagnosticos/:id/reporte', verificarToken, async (req, res) => {
       FROM diagnosticos d
       LEFT JOIN plantas p ON p.id = d.planta_id
       LEFT JOIN areas   a ON a.id = d.area_id
-      LEFT JOIN usuarios u ON u.id = d.created_by
+      LEFT JOIN usuarios u ON u.id = d.consultor_id
       LEFT JOIN tenants  t ON t.id = d.tenant_id
       WHERE d.id = $1
     `, [diagId]);
@@ -3376,7 +3424,7 @@ app.get('/api/dashboard/madurez', verificarToken, async (req, res) => {
       total_elementos: elementosPuntaje.length,
     });
   } catch (err) {
-    console.error('[DASHBOARD-MADUREZ] Error:', err.message);
+    console.error('ERROR EN [/api/dashboard/madurez]:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -3729,12 +3777,23 @@ cron.schedule('0 8 * * *', () => {
 
 console.log('[NOTIF] Cron de notificaciones registrado — ejecuta diariamente a las 8:00 AM (Bogotá)');
 
-const PORT = process.env.PORT || 3001;
+// Middleware de error global: captura next(err) y loguea el stack completo
+app.use((err, req, res, next) => {
+  console.error('[API] Error no manejado:', err.stack);
+  if (!res.headersSent) {
+    res.status(500).json({ error: err.message || 'Error interno del servidor' });
+  }
+});
+
+const PORT = process.env.PORT || 3002;
 const TIMEOUT_SERVIDOR_MS = 120000; // Keep-Alive: conexión abierta mientras Gemini procesa Fase 5 / pronóstico
 
 Promise.all([ensureTable(), ensureQuestionsTable(), ensureDiagnosticoSetup()])
+  .then(() => ensureMainTablesExist())
   .then(() => {
-    const server = app.listen(PORT, () => console.log(`API escuchando en http://localhost:${PORT}`));
+    const server = app.listen(PORT, () => {
+      console.log(`API escuchando en http://localhost:${PORT}`);
+    });
     server.timeout = TIMEOUT_SERVIDOR_MS;
     server.keepAliveTimeout = 120000; // Full-Bridge: evita cierre de conexión durante triangulación
     server.headersTimeout = TIMEOUT_SERVIDOR_MS + 1000;

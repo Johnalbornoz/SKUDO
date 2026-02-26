@@ -7,6 +7,8 @@
   </head>
   <body>
     <div id="root"></div>
+    <!-- Guarda global: evita ReferenceError _dbg is not defined (residuos de debug/consola) -->
+    <script>window._dbg = window._dbg || function(){};</script>
     <script type="module" src="/src/main.jsx"></script>
   </body>
 </html>

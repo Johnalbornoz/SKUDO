@@ -12,6 +12,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "clean": "rm -rf dist",
+    "clean:vite": "node scripts/clean-vite-cache.js",
     "lint": "tsc --noEmit"
   },
   "dependencies": {

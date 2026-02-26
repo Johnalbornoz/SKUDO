@@ -24,10 +24,15 @@ function authHeaders(extra = {}) {
 
 // No usar mode: 'no-cors' — impide leer el cuerpo de la respuesta y provoca "Failed to fetch"
 async function http(url, options = {}) {
-  const res = await fetch(url, {
-    ...options,
-    headers: { ...authHeaders(), ...options.headers },
-  });
+  let res;
+  try {
+    res = await fetch(url, {
+      ...options,
+      headers: { ...authHeaders(), ...options.headers },
+    });
+  } catch (err) {
+    throw err;
+  }
   if (res.status === 401) {
     localStorage.removeItem('skudo_token');
     localStorage.removeItem('skudo_usuario');
