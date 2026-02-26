@@ -2,8 +2,10 @@
  * NavegacionFases.jsx
  * Barra de navegación entre fases del diagnóstico.
  * Permite regresar a cualquier fase anterior con un solo clic.
+ * Incluye barra de progreso de preguntas calificadas con evidencia.
  */
 import { CheckCircle2, Lock } from 'lucide-react';
+import BarraProgresoPreguntas from './BarraProgresoPreguntas';
 
 export const FASES_DIAGNOSTICO = [
   { num: 1, label: 'Clasificación', sublabel: 'Motor PSM',       color: 'indigo' },
@@ -23,12 +25,15 @@ const COLOR_MAP = {
 };
 
 /**
- * @param {number}   faseActual  - Número de fase donde está el usuario (1-6)
- * @param {function} onNavegar   - Callback: (faseNum) => void
- * @param {boolean}  soloLectura - Si true, deshabilita navegación
+ * @param {number}   faseActual    - Número de fase donde está el usuario (1-6)
+ * @param {function} onNavegar     - Callback: (faseNum) => void
+ * @param {boolean}  soloLectura   - Si true, deshabilita navegación
+ * @param {number}   [diagnosticoId] - ID del diagnóstico para mostrar progreso de preguntas
+ * @param {any}      [refreshKey]    - Cuando cambia, se vuelve a cargar el progreso
  */
-export default function NavegacionFases({ faseActual, onNavegar, soloLectura = false }) {
+export default function NavegacionFases({ faseActual, onNavegar, soloLectura = false, diagnosticoId, refreshKey }) {
   return (
+    <div className="w-full space-y-2">
     <div className="w-full overflow-x-auto">
       <ol className="flex items-center min-w-max px-1">
         {FASES_DIAGNOSTICO.map((fase, idx) => {
@@ -72,6 +77,10 @@ export default function NavegacionFases({ faseActual, onNavegar, soloLectura = f
           );
         })}
       </ol>
+    </div>
+    {diagnosticoId && (
+      <BarraProgresoPreguntas diagnosticoId={diagnosticoId} refreshKey={refreshKey} />
+    )}
     </div>
   );
 }

@@ -283,7 +283,13 @@ export default function DiagnosticoView({ diagnosticoId, faseActual = 2, onNaveg
           {/* Navegación entre fases */}
           {onNavegar && (
             <div className="mb-3 pb-3 border-b border-gray-100">
-              <NavegacionFases faseActual={faseActual} onNavegar={onNavegar} soloLectura={soloLectura} />
+              <NavegacionFases
+                faseActual={faseActual}
+                onNavegar={onNavegar}
+                soloLectura={soloLectura}
+                diagnosticoId={diagnosticoId}
+                refreshKey={datos?.respondidas}
+              />
             </div>
           )}
 

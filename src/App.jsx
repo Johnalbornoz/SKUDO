@@ -9,10 +9,15 @@ import ConsultorDashboard from './components/ConsultorDashboard';
 import UsuariosAdmin from './components/UsuariosAdmin';
 import DiagnosticoWizard from './components/DiagnosticoWizard';
 import DiagnosticosDashboard from './components/DiagnosticosDashboard';
+import PaginaDiagnosticos from './components/PaginaDiagnosticos';
+import PlanDeAccion from './components/PlanDeAccion';
+import PaginaPronostico from './components/PaginaPronostico';
+import RadarMadurez from './components/RadarMadurez';
 import DiagnosticoView from './components/DiagnosticoView';
 import RecorridoView from './components/RecorridoView';
 import EvidenciaView from './components/EvidenciaView';
 import EntrevistasView from './components/EntrevistasView';
+import AuditoriaExpertaView from './components/AuditoriaExpertaView';
 import NavegacionFases from './components/NavegacionFases';
 import {
   LayoutDashboard,
@@ -24,6 +29,7 @@ import {
   FileText,
   LogOut,
   Building2,
+  X,
 } from 'lucide-react';
 
 const NAV_ITEMS = [
@@ -35,7 +41,7 @@ const NAV_ITEMS = [
 
 const CARDS = [
   {
-    title: 'Diagnóstico Fase I',
+    title: 'Diagnóstico',
     description: 'Evaluación inicial, análisis documental y triangulación de hallazgos en planta.',
     icon: ClipboardCheck,
     iconBg: 'bg-green-50',
@@ -62,14 +68,20 @@ function SidebarLink({ label, isActive, onClick, icon: Icon }) {
     <button
       type="button"
       onClick={() => onClick(label)}
-      className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg text-left font-medium transition-colors ${
+      className={`w-full flex items-center gap-3 px-4 py-3.5 rounded-xl text-left font-medium transition-all transform hover:scale-[1.02] active:scale-[0.98] touch-manipulation ${
         isActive
-          ? 'bg-green-100 text-gray-800'
-          : 'text-gray-600 hover:bg-gray-50 hover:text-gray-800'
+          ? 'bg-gradient-to-r from-emerald-500 to-emerald-600 text-white shadow-lg shadow-emerald-500/25'
+          : 'text-gray-700 hover:bg-gray-100 hover:text-gray-900'
       }`}
+      style={{ minHeight: '50px' }}
     >
-      <Icon className={`w-5 h-5 shrink-0 ${isActive ? 'text-gray-700' : 'text-gray-400'}`} />
-      {label}
+      <div className={`p-1.5 rounded-lg ${isActive ? 'bg-white/20' : 'bg-gray-100'}`}>
+        <Icon className={`w-5 h-5 shrink-0 ${isActive ? 'text-white' : 'text-gray-600'}`} />
+      </div>
+      <span className="truncate text-sm lg:text-base font-medium">{label}</span>
+      {isActive && (
+        <div className="w-2 h-2 bg-white rounded-full shrink-0" />
+      )}
     </button>
   );
 }
@@ -639,6 +651,7 @@ export default function App() {
 
   const [activeNav, setActiveNav] = useState('Dashboard');
   const [activeAdminTab, setActiveAdminTab] = useState('infraestructura');
+  const [sidebarOpen, setSidebarOpen] = useState(false);
   // Router de páginas: view = null (dashboard/nav normal) | 'wizard' | 'cuestionario' | 'documentos' | 'recorrido' | 'entrevistas' | 'validacion'
   const [currentPage, setCurrentPage] = useState({ view: null, diagId: null, nivel: null });
   const [diagnosticoText, setDiagnosticoText] = useState('');
@@ -675,9 +688,9 @@ export default function App() {
     setCurrentPage({ view, diagId, nivel });
   }
 
-  // Carga la jerarquía cuando se abre la página de validación IA
+  // Legacy: Carga la jerarquía solo para el asistente IA legacy
   useEffect(() => {
-    if (currentPage.view !== 'validacion') return;
+    if (currentPage.view !== 'ia-legacy') return;
     apiService.fetchHierarchy().then(({ plantas, areas }) => {
       setModalPlantas(plantas || []);
       setModalAllAreas(areas || []);
@@ -894,26 +907,78 @@ export default function App() {
   const esAdmin        = ['SuperAdmin','AdminInquilino'].includes(usuario?.rol);
 
   return (
-    <div className="flex min-h-screen bg-gray-100 text-gray-800 antialiased">
-      {/* Sidebar */}
-      <aside className="w-64 min-h-screen bg-white border-r border-gray-200 flex flex-col shadow-sm">
-        <div className="p-5 border-b border-gray-100">
+    <div className="min-h-screen bg-gradient-to-br from-gray-50 to-slate-100 text-gray-800 antialiased">
+      {/* Mobile: Top Bar con menú hamburguesa */}
+      <div className="lg:hidden bg-white border-b border-gray-200 px-4 py-3">
+        <div className="flex items-center justify-between">
           <div className="flex items-center gap-2.5">
-            <img src={skudoLogo} alt="Skudo" className="w-7 h-7 shrink-0" />
+            <img src={skudoLogo} alt="Skudo" className="w-6 h-6 shrink-0" />
             <div>
-              <h1 className="text-base font-bold text-gray-800 tracking-tight leading-tight">Skudo PSM</h1>
-              <span className="text-xs text-gray-500 font-medium">Expert System</span>
+              <h1 className="text-sm font-bold text-gray-800">Skudo PSM</h1>
+              <span className="text-xs text-gray-500">Expert System</span>
             </div>
           </div>
+          <button
+            onClick={() => setSidebarOpen(!sidebarOpen)}
+            className="p-2 rounded-xl bg-gray-100 hover:bg-gray-200 transition-colors"
+            style={{ minHeight: '44px', minWidth: '44px' }}
+          >
+            <div className="w-5 h-5 flex flex-col justify-center space-y-1">
+              <div className={`w-full h-0.5 bg-gray-600 transition-transform ${sidebarOpen ? 'rotate-45 translate-y-1.5' : ''}`} />
+              <div className={`w-full h-0.5 bg-gray-600 transition-opacity ${sidebarOpen ? 'opacity-0' : ''}`} />
+              <div className={`w-full h-0.5 bg-gray-600 transition-transform ${sidebarOpen ? '-rotate-45 -translate-y-1.5' : ''}`} />
+            </div>
+          </button>
         </div>
+      </div>
 
-        <nav className="flex-1 p-4 space-y-1">
+      <div className="flex">
+        {/* Sidebar - Desktop: Fixed, Mobile: Overlay */}
+        <aside className={`
+          ${sidebarOpen ? 'translate-x-0' : '-translate-x-full'} 
+          lg:translate-x-0 fixed lg:static inset-y-0 left-0 z-50 
+          w-72 lg:w-80 min-h-screen bg-white border-r border-gray-200 
+          flex flex-col shadow-lg lg:shadow-sm transition-transform duration-300 ease-in-out
+        `}>
+          {/* Desktop: Header */}
+          <div className="hidden lg:flex p-6 border-b border-gray-100 bg-gradient-to-r from-emerald-50 to-teal-50">
+            <div className="flex items-center gap-3">
+              <div className="p-2 bg-emerald-100 rounded-xl">
+                <img src={skudoLogo} alt="Skudo" className="w-6 h-6 shrink-0" />
+              </div>
+              <div>
+                <h1 className="text-lg font-bold text-gray-800 tracking-tight">Skudo PSM</h1>
+                <span className="text-sm text-emerald-600 font-medium">Expert System</span>
+              </div>
+            </div>
+          </div>
+
+          {/* Mobile: Header */}
+          <div className="lg:hidden p-4 border-b border-gray-100">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2.5">
+                <img src={skudoLogo} alt="Skudo" className="w-6 h-6 shrink-0" />
+                <div>
+                  <h1 className="text-base font-bold text-gray-800">Skudo PSM</h1>
+                  <span className="text-xs text-gray-500">Expert System</span>
+                </div>
+              </div>
+              <button
+                onClick={() => setSidebarOpen(false)}
+                className="p-2 rounded-xl text-gray-400 hover:text-gray-600 hover:bg-gray-100"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+          </div>
+
+          <nav className="flex-1 p-4 lg:p-6 space-y-2">
           {NAV_ITEMS.map((item) => (
             <SidebarLink
               key={item.id}
               label={item.label}
               isActive={activeNav === item.label && currentPage.view === null}
-              onClick={(label) => { setActiveNav(label); irAlDashboard(); }}
+              onClick={(label) => { setActiveNav(label); irAlDashboard(); setSidebarOpen(false); }}
               icon={SIDEBAR_ICONS[item.label]}
             />
           ))}
@@ -921,7 +986,7 @@ export default function App() {
             <SidebarLink
               label="Bandeja de Validación"
               isActive={activeNav === 'Consultor' && currentPage.view === null}
-              onClick={() => { setActiveNav('Consultor'); irAlDashboard(); }}
+              onClick={() => { setActiveNav('Consultor'); irAlDashboard(); setSidebarOpen(false); }}
               icon={Building2}
             />
           )}
@@ -959,8 +1024,16 @@ export default function App() {
         </div>
       </aside>
 
-      {/* Main */}
-      <main className="flex-1 overflow-auto">
+      {/* Overlay para cerrar sidebar en móvil */}
+      {sidebarOpen && (
+        <div 
+          className="fixed inset-0 bg-black/50 z-40 lg:hidden backdrop-blur-sm"
+          onClick={() => setSidebarOpen(false)}
+        />
+      )}
+
+        {/* Main Content Area */}
+        <main className="flex-1 overflow-auto lg:ml-0">
 
         {/* ══════════════════════════════════════════════════════
             PÁGINAS DE FASES DEL DIAGNÓSTICO (sin popup)
@@ -1008,11 +1081,27 @@ export default function App() {
           />
         )}
         {currentPage.view === 'validacion' && (
+          <AuditoriaExpertaView
+            diagnosticoId={currentPage.diagId}
+            faseActual={6}
+            onNavegar={(f) => handleNavegar(currentPage.diagId, f)}
+            onCerrar={irAlDashboard}
+            onSiguiente={(diagId) => {
+              // Finalizar diagnóstico y marcar como completado
+              irAlDashboard();
+            }}
+          />
+        )}
+        {currentPage.view === 'ia-legacy' && (
           <div className="min-h-screen bg-gray-50 py-8 px-4">
             <div className="max-w-xl mx-auto">
               {/* Navegación entre fases */}
               <div className="mb-6">
-                <NavegacionFases faseActual={6} onNavegar={(f) => handleNavegar(currentPage.diagId, f)} />
+                <NavegacionFases
+                  faseActual={6}
+                  onNavegar={(f) => handleNavegar(currentPage.diagId, f)}
+                  diagnosticoId={currentPage.diagId}
+                />
               </div>
               <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-6">
                 <div className="flex items-center justify-between mb-4">
@@ -1085,6 +1174,15 @@ export default function App() {
         ══════════════════════════════════════════════════════ */}
         {currentPage.view === null && (activeNav === 'Consultor' ? (
           <ConsultorDashboard />
+        ) : activeNav === 'Diagnóstico' ? (
+          <PaginaDiagnosticos
+            onContinuar={handleContinuarDiagnostico}
+            onNuevoDiagnostico={() => irAFase('wizard', null, null)}
+          />
+        ) : activeNav === 'Plan de Acción' ? (
+          <PlanDeAccion />
+        ) : activeNav === 'Pronóstico' ? (
+          <PaginaPronostico />
         ) : activeNav === 'Configuración' ? (
           <div className="p-8 lg:p-10">
             {/* Encabezado */}
@@ -1330,22 +1428,56 @@ export default function App() {
                 normativo bajo la metodología CCPS.
               </p>
             </header>
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-              {CARDS.map((card) => (
-                <Card
-                  key={card.title}
-                  title={card.title}
-                  description={card.description}
-                  icon={card.icon}
-                  iconBg={card.iconBg}
-                  iconColor={card.iconColor}
-                  onClick={card.title === 'Diagnóstico Fase I' ? () => irAFase('wizard', null, null) : undefined}
+            {/* ── Radar de Madurez PSM + Cards ────────────────────────── */}
+            <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
+              {/* Radar — ocupa 2/3 */}
+              <div className="xl:col-span-2">
+                <RadarMadurez
+                  onIrADiagnostico={() => irAFase('wizard', null, null)}
                 />
-              ))}
+              </div>
+              {/* Cards de acceso rápido — 1/3 */}
+              <div className="space-y-4">
+                {CARDS.map((card) => (
+                  <Card
+                    key={card.title}
+                    title={card.title}
+                    description={card.description}
+                    icon={card.icon}
+                    iconBg={card.iconBg}
+                    iconColor={card.iconColor}
+                    onClick={
+                      card.title === 'Diagnóstico'
+                        ? () => irAFase('wizard', null, null)
+                        : card.title === 'Plan de Acción'
+                          ? () => { setActiveNav('Plan de Acción'); irAlDashboard(); }
+                          : card.title === 'Pronóstico'
+                            ? () => { setActiveNav('Pronóstico'); irAlDashboard(); }
+                            : undefined
+                    }
+                  />
+                ))}
+              </div>
             </div>
 
-            {/* ── Dashboard de diagnósticos en curso e histórico ─────── */}
-            <DiagnosticosDashboard onContinuar={handleContinuarDiagnostico} />
+            {/* Acceso rápido a diagnósticos */}
+            <div className="mt-8 p-6 rounded-2xl border border-green-100 bg-green-50/50">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h3 className="text-base font-bold text-gray-900">¿Listo para comenzar?</h3>
+                  <p className="text-sm text-gray-500 mt-0.5">
+                    Accede al módulo de diagnósticos para ver el historial o iniciar un nuevo proceso.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => { setActiveNav('Diagnóstico'); irAlDashboard(); }}
+                  className="flex items-center gap-2 px-5 py-2.5 bg-green-600 hover:bg-green-700 text-white text-sm font-semibold rounded-xl shadow-sm transition-colors whitespace-nowrap"
+                >
+                  Ir a Diagnósticos →
+                </button>
+              </div>
+            </div>
           </div>
         ))}
       </main>
@@ -1422,7 +1554,7 @@ export default function App() {
           </div>
         </div>
       )}
-
+      </div>
     </div>
   );
 }

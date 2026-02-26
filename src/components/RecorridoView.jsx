@@ -651,7 +651,13 @@ export default function RecorridoView({ diagnosticoId, faseActual = 4, onNavegar
         <div className="sticky top-0 z-10 bg-white border-b border-gray-100 px-6 py-4">
           {onNavegar && (
             <div className="mb-3 pb-3 border-b border-gray-100">
-              <NavegacionFases faseActual={faseActual} onNavegar={onNavegar} soloLectura={soloLectura} />
+              <NavegacionFases
+                faseActual={faseActual}
+                onNavegar={onNavegar}
+                soloLectura={soloLectura}
+                diagnosticoId={diagnosticoId}
+                refreshKey={notas?.length}
+              />
             </div>
           )}
           <div className="flex items-start justify-between gap-4">
