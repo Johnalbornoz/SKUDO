@@ -172,22 +172,17 @@ async function geminiAnalizar(prompt) {
   return result.response.text();
 }
 
-// ─── Full-Bridge: CORS y límites para evitar "Failed to fetch" ─────────────────
-const allowedOrigins = [
-  'https://skudo.vercel.app',
-  'http://localhost:5173',
-  'http://localhost:5174',
-  'http://localhost:5175',
-  'http://localhost:5176',
-  'http://localhost:3000',
-  'http://localhost:3002'
-];
+// ─── CORS: producción (Vercel), previews y desarrollo local ─────────────────
+const CORS_ORIGIN_MAIN = 'https://skudo.vercel.app';
+const CORS_ORIGIN_LOCAL = 'http://localhost:5173';
+const CORS_VERCEL_PREVIEW = /^https:\/\/[^/]*skudo[^/]*\.vercel\.app$/;
 
 app.use(cors({
   origin: function (origin, callback) {
     if (!origin) return callback(null, true);
-    if (allowedOrigins.includes(origin)) return callback(null, true);
-    if (origin && /^https?:\/\/localhost(:\d+)?$/.test(origin)) return callback(null, true);
+    if (origin === CORS_ORIGIN_MAIN || origin === CORS_ORIGIN_LOCAL) return callback(null, true);
+    if (CORS_VERCEL_PREVIEW.test(origin)) return callback(null, true);
+    if (/^http:\/\/localhost(:\d+)?$/.test(origin)) return callback(null, true);
     callback(new Error('No permitido por CORS'));
   },
   credentials: true,
