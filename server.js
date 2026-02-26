@@ -172,21 +172,22 @@ async function geminiAnalizar(prompt) {
   return result.response.text();
 }
 
-// ─── CORS: producción (Vercel), previews y desarrollo local ─────────────────
+// ─── CORS: debe ir antes de cualquier ruta de la API ───────────────────────────
+// Acepta: skudo.vercel.app, localhost:5173 y cualquier URL que termine en .vercel.app
 const CORS_ORIGIN_MAIN = 'https://skudo.vercel.app';
 const CORS_ORIGIN_LOCAL = 'http://localhost:5173';
-const CORS_VERCEL_PREVIEW = /^https:\/\/[^/]*skudo[^/]*\.vercel\.app$/;
+const CORS_VERCEL_ANY = /^https:\/\/[^/]+\.vercel\.app$/;
 
 app.use(cors({
   origin: function (origin, callback) {
     if (!origin) return callback(null, true);
     if (origin === CORS_ORIGIN_MAIN || origin === CORS_ORIGIN_LOCAL) return callback(null, true);
-    if (CORS_VERCEL_PREVIEW.test(origin)) return callback(null, true);
+    if (CORS_VERCEL_ANY.test(origin)) return callback(null, true);
     if (/^http:\/\/localhost(:\d+)?$/.test(origin)) return callback(null, true);
     callback(new Error('No permitido por CORS'));
   },
   credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'Accept'],
   optionsSuccessStatus: 204,
 }));
