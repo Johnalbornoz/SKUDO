@@ -164,7 +164,7 @@ async function extractText(filePath, mimetype) {
 
 // Llama a Gemini desde el servidor con un prompt técnico PSM
 async function geminiAnalizar(prompt) {
-  const apiKey = process.env.VITE_GEMINI_API_KEY || process.env.GEMINI_API_KEY;
+  const apiKey = process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY;
   if (!apiKey) throw new Error('GEMINI_API_KEY no configurada en .env');
   const { GoogleGenerativeAI } = await import('@google/generative-ai');
   const model = new GoogleGenerativeAI(apiKey).getGenerativeModel({ model: 'gemini-2.5-flash' });
@@ -172,23 +172,25 @@ async function geminiAnalizar(prompt) {
   return result.response.text();
 }
 
-// ─── CORS: debe ir antes de cualquier ruta de la API ───────────────────────────
-// Acepta: skudo.vercel.app, localhost:5173 y cualquier URL que termine en .vercel.app
-const CORS_ORIGIN_MAIN = 'https://skudo.vercel.app';
-const CORS_ORIGIN_LOCAL = 'http://localhost:5173';
+// ─── CORS: lista de orígenes permitidos (Render + Vercel + local) ──────────────
+const CORS_ALLOWED_ORIGINS = [
+  'https://skudo.vercel.app',
+  'http://localhost:5173',
+];
 const CORS_VERCEL_ANY = /^https:\/\/[^/]+\.vercel\.app$/;
+const CORS_LOCALHOST = /^http:\/\/localhost(:\d+)?$/;
 
 app.use(cors({
   origin: function (origin, callback) {
     if (!origin) return callback(null, true);
-    if (origin === CORS_ORIGIN_MAIN || origin === CORS_ORIGIN_LOCAL) return callback(null, true);
+    if (CORS_ALLOWED_ORIGINS.includes(origin)) return callback(null, true);
     if (CORS_VERCEL_ANY.test(origin)) return callback(null, true);
-    if (/^http:\/\/localhost(:\d+)?$/.test(origin)) return callback(null, true);
-    callback(new Error('No permitido por CORS'));
+    if (CORS_LOCALHOST.test(origin)) return callback(null, true);
+    callback(null, false); // no enviar CORS headers → el navegador bloquea; evita 500
   },
   credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'Accept'],
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
   optionsSuccessStatus: 204,
 }));
 
@@ -200,6 +202,11 @@ app.use(express.urlencoded({ limit: '50mb', extended: true }));
 app.use((req, res, next) => {
   console.log(`${req.method} ${req.url}`);
   next();
+});
+
+// Health check para diagnosticar conexión (Render + Vercel)
+app.get('/api/health', (_req, res) => {
+  res.json({ status: 'ok', environment: process.env.NODE_ENV || 'development' });
 });
 
 // ─── JWT Middleware ────────────────────────────────────────────────────────
@@ -491,10 +498,14 @@ app.delete('/api/preguntas/:id', async (req, res) => {
 
 // POST /api/auth/login
 app.post('/api/auth/login', async (req, res) => {
-  const { email: rawEmail, password } = req.body || {};
+  const { email: rawEmail, password: rawPassword } = req.body || {};
   const email = typeof rawEmail === 'string' ? rawEmail.toLowerCase().trim() : '';
+  const password = typeof rawPassword === 'string' ? rawPassword.trim() : '';
   if (!email || !password) {
     return res.status(400).json({ error: 'Email y contraseña requeridos' });
+  }
+  if (process.env.NODE_ENV !== 'production') {
+    console.log('[LOGIN] Buscando usuario con email:', email);
   }
   try {
     const { rows } = await pool.query(
@@ -522,6 +533,42 @@ app.post('/api/auth/login', async (req, res) => {
     res.json({ token, usuario: payload });
   } catch (err) {
     console.error('[LOGIN] error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/auth/dev-reset-password — SOLO en desarrollo: restablece contraseña para poder entrar en local
+// En producción (NODE_ENV=production) no existe. En .env local: DEV_PASSWORD_RESET_SECRET y DEV_RESET_PASSWORD
+app.post('/api/auth/dev-reset-password', async (req, res) => {
+  if (process.env.NODE_ENV === 'production') {
+    return res.status(404).json({ error: 'No disponible' });
+  }
+  const secret = process.env.DEV_PASSWORD_RESET_SECRET;
+  const newPassword = process.env.DEV_RESET_PASSWORD || 'Admin123!';
+  if (!secret) {
+    return res.status(400).json({
+      error: 'Añade DEV_PASSWORD_RESET_SECRET y DEV_RESET_PASSWORD en .env para usar esta ruta en local.',
+    });
+  }
+  const { email: rawEmail, secret: bodySecret } = req.body || {};
+  const email = typeof rawEmail === 'string' ? rawEmail.toLowerCase().trim() : '';
+  if (!email || bodySecret !== secret) {
+    return res.status(401).json({ error: 'Email y secret requeridos y correctos' });
+  }
+  try {
+    const { rows } = await pool.query(
+      'SELECT id FROM usuarios WHERE email = $1 AND activo = true',
+      [email]
+    );
+    if (!rows[0]) {
+      return res.status(404).json({ error: 'Usuario no encontrado' });
+    }
+    const hash = await bcrypt.hash(newPassword, 12);
+    await pool.query('UPDATE usuarios SET password_hash = $1 WHERE id = $2', [hash, rows[0].id]);
+    console.log('[DEV] Contraseña restablecida para', email);
+    res.json({ ok: true, message: `Contraseña actualizada. Usa: ${email} / ${newPassword}` });
+  } catch (err) {
+    console.error('[DEV] Error restableciendo contraseña:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -1649,7 +1696,7 @@ app.post(
   uploadAudioEntrevista.single('audio'),
   async (req, res) => {
     if (!req.file) return res.status(400).json({ error: 'No se recibió archivo de audio.' });
-    const apiKey = process.env.VITE_GEMINI_API_KEY || process.env.GEMINI_API_KEY;
+    const apiKey = process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY;
     if (!apiKey) return res.status(503).json({ error: 'GEMINI_API_KEY no configurada para transcripción.' });
     try {
       const buf = fs.readFileSync(req.file.path);
@@ -2165,6 +2212,8 @@ async function ensureDiagnosticoSetup() {
       `ALTER TABLE diagnosticos ADD COLUMN IF NOT EXISTS puntuacion      INTEGER`,
       `ALTER TABLE diagnosticos ADD COLUMN IF NOT EXISTS fecha_cierre    TIMESTAMP`,
       `ALTER TABLE diagnosticos ADD COLUMN IF NOT EXISTS resultado_ia_fase2 TEXT`,
+      `ALTER TABLE diagnosticos ADD COLUMN IF NOT EXISTS analisis_final_ia JSONB`,
+      `ALTER TABLE diagnosticos ADD COLUMN IF NOT EXISTS analisis_generado_en TIMESTAMP`,
     ]) { await pool.query(sql).catch(() => {}); }
 
     // Ampliar el CHECK de estado para incluir las fases del workflow
@@ -3318,7 +3367,7 @@ app.get('/api/dashboard/madurez', verificarToken, async (req, res) => {
 
     // Buscar el diagnóstico más reciente finalizado (o el último con respuestas)
     let diagQuery = `
-      SELECT d.id, d.nivel_calculado, d.analisis_final_ia,
+      SELECT d.id, d.nivel_calculado,
              p.nombre AS planta_nombre, a.nombre AS area_nombre
       FROM diagnosticos d
       LEFT JOIN plantas p ON p.id = d.planta_id
@@ -3773,6 +3822,11 @@ cron.schedule('0 8 * * *', () => {
 
 console.log('[NOTIF] Cron de notificaciones registrado — ejecuta diariamente a las 8:00 AM (Bogotá)');
 
+// 404: rutas no encontradas — siempre JSON (evita HTML y "Failed to fetch" en el frontend)
+app.use((_req, res) => {
+  res.status(404).json({ error: 'Ruta no encontrada' });
+});
+
 // Middleware de error global: captura next(err) y loguea el stack completo
 app.use((err, req, res, next) => {
   console.error('[API] Error no manejado:', err.stack);
@@ -3786,7 +3840,24 @@ const TIMEOUT_SERVIDOR_MS = 120000; // Keep-Alive: conexión abierta mientras Ge
 
 Promise.all([ensureTable(), ensureQuestionsTable(), ensureDiagnosticoSetup()])
   .then(() => ensureMainTablesExist())
-  .then(() => {
+  .then(async () => {
+    // En local: opcionalmente fijar contraseña conocida para poder entrar (solo si ALLOW_DEV_AUTO_SEED=true)
+    if (process.env.NODE_ENV !== 'production' && process.env.ALLOW_DEV_AUTO_SEED === 'true') {
+      const devEmail = (process.env.DEV_LOGIN_EMAIL || 'admin@skudo.app').toLowerCase().trim();
+      const devPass = process.env.DEV_RESET_PASSWORD || 'Admin123!';
+      try {
+        const { rows } = await pool.query('SELECT id FROM usuarios WHERE email = $1', [devEmail]);
+        if (rows[0]) {
+          const hash = await bcrypt.hash(devPass, 12);
+          await pool.query('UPDATE usuarios SET password_hash = $1 WHERE id = $2', [hash, rows[0].id]);
+          console.log('[DEV] Contraseña local fijada para', devEmail, '→ usa esa contraseña para entrar.');
+        } else {
+          console.log('[DEV] Usuario', devEmail, 'no existe. Ejecuta: npm run migrate  o  node scripts/ensureAdmin.js');
+        }
+      } catch (e) {
+        console.warn('[DEV] Auto-seed omitido:', e.message);
+      }
+    }
     const server = app.listen(PORT, () => {
       console.log(`API escuchando en http://localhost:${PORT}`);
     });
