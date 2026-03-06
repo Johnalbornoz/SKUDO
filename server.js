@@ -165,11 +165,59 @@ async function extractText(filePath, mimetype) {
 // Llama a Gemini desde el servidor con un prompt técnico PSM
 async function geminiAnalizar(prompt) {
   const apiKey = process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY;
-  if (!apiKey) throw new Error('GEMINI_API_KEY no configurada en .env');
+  if (!apiKey) throw new Error('GEMINI_API_KEY no configurada en .env. Añade GEMINI_API_KEY=tu-api-key en la raíz del proyecto (archivo .env). Obtén la clave en: https://aistudio.google.com/apikey');
   const { GoogleGenerativeAI } = await import('@google/generative-ai');
   const model = new GoogleGenerativeAI(apiKey).getGenerativeModel({ model: 'gemini-2.5-flash' });
   const result = await model.generateContent(prompt);
   return result.response.text();
+}
+
+/** Extrae el primer objeto JSON completo (por llaves balanceadas) de un string. */
+function extractJsonObject(str) {
+  if (!str || typeof str !== 'string') return null;
+  const start = str.indexOf('{');
+  if (start === -1) return null;
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+  let quote = '';
+  for (let i = start; i < str.length; i++) {
+    const c = str[i];
+    if (escape) { escape = false; continue; }
+    if (c === '\\' && inString) { escape = true; continue; }
+    if (!inString) {
+      if (c === '{') depth++;
+      else if (c === '}') { depth--; if (depth === 0) return str.slice(start, i + 1); }
+      else if (c === '"' || c === "'") { inString = true; quote = c; }
+      continue;
+    }
+    if (c === quote) inString = false;
+  }
+  return null;
+}
+
+/**
+ * Parsea JSON devuelto por Gemini de forma tolerante: quita markdown, extrae el objeto,
+ * corrige comas finales en arrays/objetos y reintenta.
+ * @param {string} raw - Respuesta cruda de la IA
+ * @returns {{ parsed: object } | { parsed: null, raw: string }} parsed o null si no se pudo parsear
+ */
+function parseJsonFromGemini(raw) {
+  if (!raw || typeof raw !== 'string') return { parsed: null, raw: raw || '' };
+  let clean = raw.replace(/```json\s*/gi, '').replace(/```\s*/g, '').trim();
+  let jsonStr = extractJsonObject(clean) || clean.match(/\{[\s\S]*\}/)?.[0] || clean;
+  const fixTrailingCommas = (s) => String(s)
+    .replace(/,(\s*)\]/g, '$1]')
+    .replace(/,(\s*)\}/g, '$1}');
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const parsed = JSON.parse(attempt === 1 ? fixTrailingCommas(jsonStr) : jsonStr);
+      return { parsed: typeof parsed === 'object' && parsed !== null ? parsed : null, raw };
+    } catch (_) {
+      if (attempt === 0) jsonStr = fixTrailingCommas(jsonStr);
+    }
+  }
+  return { parsed: null, raw };
 }
 
 // ─── CORS: lista de orígenes permitidos (Render + Vercel + local) ──────────────
@@ -243,9 +291,11 @@ function tenantScope(req) {
   return tenant_id;
 }
 
+const dbUrl = process.env.DATABASE_URL || '';
+const isLocalDb = !dbUrl || dbUrl.includes('localhost') || dbUrl.includes('127.0.0.1');
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }, // Necesario para Neon y otros Postgres con SSL
+  ssl: isLocalDb ? false : { rejectUnauthorized: false }, // SSL solo para Postgres remotos (Neon, etc.)
 });
 
 /** Verifica que las tablas principales existan antes de aceptar tráfico (evita 500 por tablas faltantes). */
@@ -297,8 +347,12 @@ app.get('/api/config', async (req, res) => {
     const data = rows[0] || { id: 1, empresa: '', sector: '', responsable: '', system_prompt: '' };
     res.json(data);
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: err.message });
+    if (err.code === '42P01') {
+      console.warn('[GET /api/config] Tabla configuracion no existe aún. Devolviendo valores por defecto.');
+      return res.json({ id: 1, empresa: '', sector: '', responsable: '', system_prompt: '' });
+    }
+    console.error('[GET /api/config] error:', err.message, err.code);
+    res.status(500).json({ error: err.message || 'Error al cargar configuración' });
   }
 });
 
@@ -368,7 +422,8 @@ async function ensureQuestionsTable() {
 }
 
 // GET /api/preguntas?search=texto  – lista resumida (id + Elemento + Pregunta truncada)
-app.get('/api/preguntas', async (req, res) => {
+// GET /api/questions – alias para el frontend (misma respuesta)
+const handlerGetPreguntas = async (req, res) => {
   try {
     const { search } = req.query;
     let q = 'SELECT id, complejidad, elemento, LEFT(pregunta, 300) AS pregunta FROM preguntas';
@@ -381,8 +436,47 @@ app.get('/api/preguntas', async (req, res) => {
     const { rows } = await pool.query(q, params);
     res.json(rows);
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: err.message });
+    if (err.code === '42P01') {
+      console.warn('[GET /api/preguntas|questions] Tabla preguntas no existe aún. Devolviendo [].');
+      return res.json([]);
+    }
+    console.error('[GET /api/preguntas|questions] error:', err.message, err.code);
+    res.status(500).json({ error: err.message || 'Error al cargar preguntas' });
+  }
+};
+app.get('/api/preguntas', handlerGetPreguntas);
+app.get('/api/questions', handlerGetPreguntas);
+
+// GET /api/criteria – criterios de puntuación (alias para frontend; devuelve array; si no existe tabla, [])
+app.get('/api/criteria', async (_req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT id, level_name, min_score, max_score, description FROM criterios_efectividad ORDER BY min_score ASC`
+    );
+    res.json(rows || []);
+  } catch (err) {
+    if (err.code === '42P01') console.warn('[GET /api/criteria] Tabla criterios_efectividad no existe, devolviendo [].');
+    else console.error('[GET /api/criteria] error:', err.message);
+    res.json([]);
+  }
+});
+
+// GET /api/sessions – diagnósticos recientes (alias para frontend: installation_name, level, status, created_at)
+app.get('/api/sessions', async (_req, res) => {
+  try {
+    const { rows } = await pool.query(`
+      SELECT d.id, d.created_at, d.estado AS status, d.nivel_calculado AS level,
+             COALESCE(p.nombre, 'Diagnóstico #' || d.id) AS installation_name
+      FROM diagnosticos d
+      LEFT JOIN plantas p ON p.id = d.planta_id
+      ORDER BY d.created_at DESC
+      LIMIT 50
+    `);
+    res.json(rows || []);
+  } catch (err) {
+    if (err.code === '42P01') console.warn('[GET /api/sessions] Tabla diagnosticos no existe, devolviendo [].');
+    else console.error('[GET /api/sessions] error:', err.message);
+    res.json([]);
   }
 });
 
@@ -494,6 +588,11 @@ app.delete('/api/preguntas/:id', async (req, res) => {
   }
 });
 
+// GET /api/health — comprobación de que la API está en marcha (sin auth; para wait-on y scripts)
+app.get('/api/health', (_req, res) => {
+  res.json({ ok: true, message: 'API SKUDO en marcha', port: process.env.PORT || 3002 });
+});
+
 // ─── Autenticación ────────────────────────────────────────────────────────
 
 // POST /api/auth/login
@@ -518,6 +617,10 @@ app.post('/api/auth/login', async (req, res) => {
       console.log('[LOGIN] Usuario encontrado: no');
       return res.status(401).json({ error: 'Credenciales incorrectas' });
     }
+    if (!user.password_hash) {
+      console.error('[LOGIN] Usuario sin password_hash (id:', user.id, ')');
+      return res.status(500).json({ error: 'Configuración del usuario incorrecta. Contacta al administrador.' });
+    }
     console.log('[LOGIN] Usuario encontrado: si');
     const hashOk = await bcrypt.compare(password, user.password_hash);
     console.log('[LOGIN] Comparación de hash: ' + (hashOk ? 'exitosa' : 'fallida'));
@@ -525,15 +628,24 @@ app.post('/api/auth/login', async (req, res) => {
       return res.status(401).json({ error: 'Credenciales incorrectas' });
     }
     const payload = {
-      id: user.id, email: user.email, nombre: user.nombre,
-      rol: user.rol, tenant_id: user.tenant_id,
+      id: user.id,
+      email: user.email,
+      nombre: user.nombre,
+      rol: user.rol ?? null,
+      tenant_id: user.tenant_id,
     };
     const token = jwt.sign(payload, JWT_SECRET, { expiresIn: '8h' });
     console.log(`[LOGIN] ${user.email} (${user.rol})`);
     res.json({ token, usuario: payload });
   } catch (err) {
     console.error('[LOGIN] error:', err.message);
-    res.status(500).json({ error: err.message });
+    console.error('[LOGIN] stack:', err.stack);
+    // Mensajes seguros para el cliente según tipo de error
+    const isDbError = err.code === 'ECONNREFUSED' || err.code === 'ENOTFOUND' || err.code === 'ETIMEDOUT' || err.code === '42P01';
+    const message = isDbError
+      ? 'Servicio no disponible. Comprueba que la base de datos esté configurada (DATABASE_URL) y que hayas ejecutado: npm run migrate'
+      : (err.message || 'Error interno en el login');
+    res.status(500).json({ error: message });
   }
 });
 
@@ -612,7 +724,7 @@ app.put('/api/tenants/:id', verificarToken, verificarRol('SuperAdmin'), async (r
 
 // ─── Usuarios ────────────────────────────────────────────────────────────
 
-app.get('/api/usuarios', verificarToken, verificarRol('SuperAdmin', 'AdminInquilino'), async (req, res) => {
+const handlerGetUsuarios = async (req, res) => {
   try {
     const tid = tenantScope(req);
     let q = 'SELECT id, email, nombre, rol, tenant_id, activo, created_at FROM usuarios';
@@ -620,18 +732,27 @@ app.get('/api/usuarios', verificarToken, verificarRol('SuperAdmin', 'AdminInquil
     if (tid) { q += ' WHERE tenant_id = $1'; params.push(tid); }
     q += ' ORDER BY nombre ASC';
     const { rows } = await pool.query(q, params);
-    res.json(rows);
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
+    // Alias para frontend que espera name/role
+    const data = rows.map(r => ({ ...r, name: r.nombre, role: r.rol }));
+    res.json(data);
+  } catch (err) {
+    console.error('[GET /api/usuarios|users] error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+};
+app.get('/api/usuarios', verificarToken, verificarRol('SuperAdmin', 'AdminInquilino'), handlerGetUsuarios);
+app.get('/api/users', verificarToken, verificarRol('SuperAdmin', 'AdminInquilino'), handlerGetUsuarios);
+
+const ROLES_PERMITIDOS = ['admin_cliente', 'operativo_n1', 'verificador_n2', 'consultor_skudo', 'ejecutivo_lectura'];
 
 app.post('/api/usuarios', verificarToken, verificarRol('SuperAdmin', 'AdminInquilino'), async (req, res) => {
   const { email, password, nombre, rol, tenant_id } = req.body;
   if (!email || !password || !nombre || !rol) {
     return res.status(400).json({ error: 'email, password, nombre y rol son obligatorios' });
   }
-  const rolesPermitidos = ['SuperAdmin', 'Consultor', 'AdminInquilino', 'Auditor', 'Lector'];
-  if (!rolesPermitidos.includes(rol)) {
-    return res.status(400).json({ error: `Rol inválido. Permitidos: ${rolesPermitidos.join(', ')}` });
+  const rolVal = typeof rol === 'string' ? rol.trim() : '';
+  if (!ROLES_PERMITIDOS.includes(rolVal)) {
+    return res.status(400).json({ error: `Rol inválido. Permitidos: ${ROLES_PERMITIDOS.join(', ')}` });
   }
   try {
     const hash = await bcrypt.hash(password, 12);
@@ -639,7 +760,7 @@ app.post('/api/usuarios', verificarToken, verificarRol('SuperAdmin', 'AdminInqui
     const { rows } = await pool.query(
       `INSERT INTO usuarios (email, password_hash, nombre, rol, tenant_id)
        VALUES ($1,$2,$3,$4,$5) RETURNING id, email, nombre, rol, tenant_id`,
-      [email.toLowerCase().trim(), hash, nombre, rol, tid]
+      [email.toLowerCase().trim(), hash, nombre, rolVal, tid]
     );
     res.status(201).json(rows[0]);
   } catch (err) {
@@ -652,12 +773,15 @@ app.put('/api/usuarios/:id', verificarToken, verificarRol('SuperAdmin', 'AdminIn
   const { nombre, email, password, rol, activo, tenant_id } = req.body;
   const id = Number(req.params.id);
 
-  // AdminInquilino: no puede promover a SuperAdmin ni Consultor
-  if (req.usuario.rol === 'AdminInquilino') {
-    if (['SuperAdmin', 'Consultor'].includes(rol)) {
-      return res.status(403).json({ error: 'No tienes permiso para asignar ese rol' });
+  if (rol !== undefined && rol !== null) {
+    const rolVal = typeof rol === 'string' ? rol.trim() : '';
+    if (!ROLES_PERMITIDOS.includes(rolVal)) {
+      return res.status(400).json({ error: `Rol inválido. Permitidos: ${ROLES_PERMITIDOS.join(', ')}` });
     }
-    // Solo puede editar usuarios de su mismo tenant
+  }
+
+  // AdminInquilino: solo puede editar usuarios de su mismo tenant
+  if (req.usuario.rol === 'AdminInquilino') {
     const { rows } = await pool.query('SELECT tenant_id FROM usuarios WHERE id=$1', [id]);
     if (!rows.length) return res.status(404).json({ error: 'Usuario no encontrado' });
     if (rows[0].tenant_id !== req.usuario.tenant_id) {
@@ -666,8 +790,11 @@ app.put('/api/usuarios/:id', verificarToken, verificarRol('SuperAdmin', 'AdminIn
   }
 
   try {
+    const rolFinal = rol !== undefined && rol !== null ? (typeof rol === 'string' ? rol.trim() : rol) : undefined;
+    const { rows: current } = await pool.query('SELECT nombre, rol, activo FROM usuarios WHERE id=$1', [id]);
+    if (!current.length) return res.status(404).json({ error: 'Usuario no encontrado' });
     const setClauses = ['nombre=$1', 'rol=$2', 'activo=$3'];
-    const params = [nombre, rol, activo !== false];
+    const params = [nombre ?? current[0].nombre, rolFinal !== undefined ? rolFinal : current[0].rol, activo !== false];
     let idx = 4;
 
     if (email) { setClauses.push(`email=$${idx++}`); params.push(email.toLowerCase().trim()); }
@@ -948,15 +1075,40 @@ app.get('/api/diagnosticos/:id/preguntas', verificarToken, async (req, res) => {
       }
     }
 
-    // 4. Devolver las preguntas con su respuesta actual, agrupadas por elemento
-    const { rows } = await pool.query(
-      `SELECT p.*, dr.respuesta, dr.comentario, dr.id AS respuesta_id
-       FROM diagnostico_respuestas dr
-       JOIN preguntas p ON p.id = dr.pregunta_id
-       WHERE dr.diagnostico_id = $1
-       ORDER BY dr.orden, p.elemento, p.id`,
-      [diagId]
-    );
+    // 4. Devolver preguntas: si hay snapshot (alcance confirmado), leer solo de ahí; si no, de preguntas+dr
+    let rows;
+    const snapshot = await getPreguntasSnapshot(diagId);
+    if (snapshot.length > 0) {
+      const { rows: conResp } = await pool.query(
+        `SELECT dp.id, dp.pregunta_id, dp.pregunta_texto, dp.elemento_psm_id, dp.elemento_psm_nombre, dp.orden,
+                dr.respuesta, dr.comentario
+         FROM diagnostico_preguntas dp
+         LEFT JOIN diagnostico_respuestas dr ON dr.diagnostico_id = dp.diagnostico_id AND dr.pregunta_id = dp.pregunta_id
+         WHERE dp.diagnostico_id = $1
+         ORDER BY dp.orden, dp.id`,
+        [diagId]
+      );
+      rows = conResp.map((r) => ({
+        id: r.pregunta_id,
+        pregunta: r.pregunta_texto,
+        elemento: r.elemento_psm_nombre || 'General',
+        respuesta: r.respuesta,
+        comentario: r.comentario,
+        respuesta_id: r.id,
+        elemento_psm_id: r.elemento_psm_id,
+        orden: r.orden,
+      }));
+    } else {
+      const { rows: fromP } = await pool.query(
+        `SELECT p.*, dr.respuesta, dr.comentario, dr.id AS respuesta_id
+         FROM diagnostico_respuestas dr
+         JOIN preguntas p ON p.id = dr.pregunta_id
+         WHERE dr.diagnostico_id = $1
+         ORDER BY dr.orden, p.elemento, p.id`,
+        [diagId]
+      );
+      rows = fromP;
+    }
 
     // Agrupar por elemento (categoría)
     const grupos = {};
@@ -972,6 +1124,7 @@ app.get('/api/diagnosticos/:id/preguntas', verificarToken, async (req, res) => {
       estado_diagnostico: diag.estado,
       respondidas: rows.filter((r) => r.respuesta).length,
       grupos,
+      alcance_confirmado: snapshot.length > 0,
     });
   } catch (err) {
     console.error('[preguntas filtradas]', err.message);
@@ -980,17 +1133,57 @@ app.get('/api/diagnosticos/:id/preguntas', verificarToken, async (req, res) => {
 });
 
 // GET /api/diagnosticos/:id/progreso-preguntas
-// Devuelve total de preguntas en alcance y cuántas tienen calificación con evidencia (IA)
+// Devuelve total de preguntas en alcance y cuántas tienen calificación con evidencia (IA). Usa snapshot si existe.
 app.get('/api/diagnosticos/:id/progreso-preguntas', verificarToken, async (req, res) => {
   const diagId = Number(req.params.id);
   try {
+    const snapshot = await getPreguntasSnapshot(diagId);
+
+    if (snapshot.length > 0) {
+      // Total = preguntas del alcance confirmado (snapshot)
+      const total = snapshot.length;
+      const preguntaIds = new Set(snapshot.map((s) => s.pregunta_id));
+
+      const { rows: docs } = await pool.query(
+        `SELECT calificaciones FROM diagnostico_documentos
+         WHERE diagnostico_id=$1 AND estado='Analizado' AND calificaciones IS NOT NULL`,
+        [diagId]
+      );
+      const preguntasConEvidenciaDoc = new Set();
+      for (const doc of docs) {
+        const cals = Array.isArray(doc.calificaciones) ? doc.calificaciones : [];
+        for (const c of cals) {
+          if (c.pregunta_id != null && preguntaIds.has(Number(c.pregunta_id))) {
+            preguntasConEvidenciaDoc.add(Number(c.pregunta_id));
+          }
+          const textoPregunta = (c.pregunta || '').trim().slice(0, 150);
+          if (textoPregunta) {
+            for (const s of snapshot) {
+              const st = (s.pregunta_texto || '').slice(0, 150);
+              if (st && (st.includes(textoPregunta.slice(0, 80)) || textoPregunta.includes(st.slice(0, 80)))) {
+                preguntasConEvidenciaDoc.add(s.pregunta_id);
+                break;
+              }
+            }
+          }
+        }
+      }
+      const { rows: [hitlCount] } = await pool.query(
+        `SELECT COUNT(DISTINCT pregunta_id)::int AS n FROM diagnostico_validaciones_hitl WHERE diagnostico_id=$1 AND pregunta_id = ANY($2)`,
+        [diagId, Array.from(preguntaIds)]
+      );
+      const conHitl = hitlCount?.n ?? 0;
+      const calificadas_con_evidencia = Math.max(preguntasConEvidenciaDoc.size, conHitl);
+
+      return res.json({ total, calificadas_con_evidencia });
+    }
+
     const { rows: [diag] } = await pool.query(
       'SELECT nivel_calculado FROM diagnosticos WHERE id=$1', [diagId]
     );
     if (!diag) return res.status(404).json({ error: 'Diagnóstico no encontrado' });
     const nivel = diag.nivel_calculado ?? 1;
 
-    // Crear alcance si no existe (igual que GET /preguntas)
     const { rowCount: yaFijado } = await pool.query(
       'SELECT 1 FROM diagnostico_respuestas WHERE diagnostico_id=$1 LIMIT 1', [diagId]
     );
@@ -1069,11 +1262,105 @@ app.patch(
   }
 );
 
+/** Devuelve el snapshot de preguntas congeladas del diagnóstico. Si no hay snapshot, retorna []. */
+async function getPreguntasSnapshot(diagId) {
+  const { rows } = await pool.query(
+    `SELECT id, diagnostico_id, pregunta_id, pregunta_texto, elemento_psm_id, elemento_psm_nombre, orden,
+            respuesta_ia_docs, respuesta_ia_entrevistas, conclusion_final, validado_auditor
+     FROM diagnostico_preguntas
+     WHERE diagnostico_id = $1
+     ORDER BY orden ASC, id ASC`,
+    [diagId]
+  );
+  return rows;
+}
+
+// GET /api/diagnosticos/:id/alcance-confirmado — indica si el diagnóstico tiene snapshot de preguntas
+app.get('/api/diagnosticos/:id/alcance-confirmado', verificarToken, async (req, res) => {
+  try {
+    const snapshot = await getPreguntasSnapshot(Number(req.params.id));
+    res.json({ confirmado: snapshot.length > 0, total: snapshot.length });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/diagnosticos/:id/confirmar-alcance — Fase 1: congela el alcance (INSERT masivo en diagnostico_preguntas)
+app.post('/api/diagnosticos/:id/confirmar-alcance', verificarToken, async (req, res) => {
+  const diagId = Number(req.params.id);
+  try {
+    const { rows: [diag] } = await pool.query(
+      'SELECT estado FROM diagnosticos WHERE id = $1',
+      [diagId]
+    );
+    if (!diag) return res.status(404).json({ error: 'Diagnóstico no encontrado' });
+    if (diag.estado === 'Finalizado' || diag.estado === 'Aprobado') {
+      return res.status(403).json({ error: 'No se puede modificar el alcance de un diagnóstico finalizado.' });
+    }
+
+    const { rows: alcance } = await pool.query(
+      `SELECT dr.pregunta_id, dr.orden, p.pregunta, p.elemento
+       FROM diagnostico_respuestas dr
+       JOIN preguntas p ON p.id = dr.pregunta_id
+       WHERE dr.diagnostico_id = $1
+       ORDER BY dr.orden ASC, dr.pregunta_id ASC`,
+      [diagId]
+    );
+    if (!alcance.length) {
+      return res.status(400).json({ error: 'No hay preguntas en el alcance. Fija primero el alcance desde la Fase 1.' });
+    }
+
+    const catalog = await getElementosPsmCatalog();
+    await pool.query('DELETE FROM diagnostico_preguntas WHERE diagnostico_id = $1', [diagId]);
+
+    for (const a of alcance) {
+      const resolved = resolveBySimilarity(a.elemento, catalog) || resolveElementoPsm({ elemento: a.elemento }, catalog);
+      await pool.query(
+        `INSERT INTO diagnostico_preguntas (diagnostico_id, pregunta_id, pregunta_texto, elemento_psm_id, elemento_psm_nombre, orden)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         ON CONFLICT (diagnostico_id, pregunta_id) DO UPDATE SET
+           pregunta_texto = EXCLUDED.pregunta_texto,
+           elemento_psm_id = EXCLUDED.elemento_psm_id,
+           elemento_psm_nombre = EXCLUDED.elemento_psm_nombre,
+           orden = EXCLUDED.orden`,
+        [diagId, a.pregunta_id, a.pregunta || '', resolved?.id ?? null, resolved?.nombre ?? a.elemento ?? null, a.orden ?? 0]
+      );
+    }
+    const snapshot = await getPreguntasSnapshot(diagId);
+    console.log(`[SNAPSHOT] Diagnóstico #${diagId}: ${snapshot.length} preguntas congeladas.`);
+    res.json({ ok: true, total: snapshot.length, mensaje: 'Alcance confirmado. Las fases siguientes usarán exclusivamente estas preguntas.' });
+  } catch (err) {
+    console.error('[confirmar-alcance]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // GET /api/diagnosticos/:id/preguntas-para-ia
-// Devuelve el resumen de preguntas + respuestas del alcance fijado, para enviar a Gemini.
+// Devuelve el resumen de preguntas del alcance (snapshot si existe; si no, desde preguntas+dr).
 app.get('/api/diagnosticos/:id/preguntas-para-ia', verificarToken, async (req, res) => {
   const diagId = Number(req.params.id);
   try {
+    const snapshot = await getPreguntasSnapshot(diagId);
+    if (snapshot.length > 0) {
+      const { rows: conRespuesta } = await pool.query(
+        `SELECT dp.id, dp.pregunta_id, dp.pregunta_texto, dp.elemento_psm_id, dp.elemento_psm_nombre, dp.orden,
+                dr.respuesta, dr.comentario
+         FROM diagnostico_preguntas dp
+         LEFT JOIN diagnostico_respuestas dr ON dr.diagnostico_id = dp.diagnostico_id AND dr.pregunta_id = dp.pregunta_id
+         WHERE dp.diagnostico_id = $1
+         ORDER BY dp.orden, dp.id`,
+        [diagId]
+      );
+      return res.json(conRespuesta.map((r) => ({
+        elemento: r.elemento_psm_nombre || '',
+        pregunta: r.pregunta_texto,
+        complejidad: null,
+        respuesta: r.respuesta,
+        comentario: r.comentario,
+        pregunta_id: r.pregunta_id,
+        elemento_psm_id: r.elemento_psm_id,
+      })));
+    }
     const { rows } = await pool.query(
       `SELECT p.elemento, p.pregunta, p.complejidad,
               dr.respuesta, dr.comentario,
@@ -1139,6 +1426,88 @@ app.get('/api/diagnosticos/:id', verificarToken, async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+// Admin: limpiar diagnósticos finalizados (solo SuperAdmin/AdminInquilino) — rutas registradas aquí para que no las capture /api/diagnosticos/:id
+app.get(
+  '/api/admin/limpiar-diagnosticos-finalizados/preview',
+  verificarToken,
+  verificarRol('SuperAdmin', 'AdminInquilino'),
+  async (req, res) => {
+    try {
+      const tid = tenantScope(req);
+      let q = `SELECT d.id, d.estado, d.created_at, p.nombre AS planta_nombre
+               FROM diagnosticos d
+               LEFT JOIN plantas p ON p.id = d.planta_id
+               WHERE d.estado IN ('Finalizado','Aprobado')`;
+      const params = [];
+      if (tid) { q += ' AND d.tenant_id = $1'; params.push(tid); }
+      q += ' ORDER BY d.created_at DESC';
+      const { rows } = await pool.query(q, params);
+      res.json({ total: rows.length, items: rows });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  }
+);
+app.post(
+  '/api/admin/limpiar-diagnosticos-finalizados',
+  verificarToken,
+  verificarRol('SuperAdmin', 'AdminInquilino'),
+  async (req, res) => {
+    try {
+      const tid = tenantScope(req);
+      const { rows: toDelete } = await pool.query(
+        `SELECT id FROM diagnosticos WHERE estado IN ('Finalizado','Aprobado')${tid ? ' AND tenant_id = $1' : ''}`,
+        tid ? [tid] : []
+      );
+      const ids = toDelete.map((r) => r.id);
+      if (ids.length === 0) {
+        return res.json({ ok: true, eliminados: 0, mensaje: 'No hay diagnósticos finalizados que eliminar.' });
+      }
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        for (const table of [
+          'plan_accion_items',
+          'diagnostico_preguntas',
+          'diagnostico_documentos',
+          'diagnostico_entrevistas',
+          'diagnostico_recorrido',
+          'diagnostico_respuestas',
+          'diagnostico_validaciones_hitl',
+        ]) {
+          try {
+            await client.query(
+              `DELETE FROM ${table} WHERE diagnostico_id = ANY($1::int[])`,
+              [ids]
+            );
+          } catch (e) {
+            if (e.code !== '42P01') throw e;
+          }
+        }
+        const { rowCount } = await client.query(
+          'DELETE FROM diagnosticos WHERE id = ANY($1::int[])',
+          [ids]
+        );
+        await client.query('COMMIT');
+        console.log(`[ADMIN] Limpieza diagnósticos finalizados: ${rowCount} eliminados.`);
+        res.json({
+          ok: true,
+          eliminados: rowCount,
+          mensaje: `Se eliminaron ${rowCount} diagnóstico(s) finalizado(s).`,
+        });
+      } catch (err) {
+        await client.query('ROLLBACK');
+        throw err;
+      } finally {
+        client.release();
+      }
+    } catch (err) {
+      console.error('[ADMIN] limpiar-diagnosticos-finalizados:', err.message);
+      res.status(500).json({ error: err.message });
+    }
+  }
+);
 
 app.post('/api/diagnosticos', verificarToken, async (req, res) => {
   const { planta_id, area_id, escenario, resultado_ia, estado } = req.body;
@@ -1209,47 +1578,77 @@ app.patch('/api/diagnosticos/:id/progreso', verificarToken, async (req, res) => 
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ─── Gestión Documental – Fase 2 ─────────────────────────────────────────────
+// ─── Gestión Documental – Fase 2 (General | Estándares | Plan de Emergencias) ───
 
-const CATEGORIAS_PSM = [
-  'Información General',
-  'Dirección y Organización',
-  'Análisis de Riesgos (HAZOP/LOPA)',
-  'Documentos de Proceso (P&IDs)',
-  'Desempeño y KPIs',
-  'Normativos y Regulatorios',
-  'Procedimientos Operacionales',
-  'Registros de Mantenimiento',
-];
+const CATEGORIAS_PSM = ['General', 'Estándares', 'Plan de Emergencias'];
 
-// GET /api/diagnosticos/:id/documentos
-// Incluye analisis_ia para que el informe por documento persista tras subir nuevos archivos
+// Asegurar default 'General' y normalizar categorías existentes a las tres permitidas
+async function ensureDocumentosCategoriaDefault() {
+  try {
+    await pool.query(`ALTER TABLE diagnostico_documentos ALTER COLUMN categoria SET DEFAULT 'General'`);
+    await pool.query(`
+      UPDATE diagnostico_documentos
+      SET categoria = 'General'
+      WHERE categoria IS NULL OR categoria NOT IN ('General', 'Estándares', 'Plan de Emergencias')
+    `);
+  } catch (_) { /* puede fallar si ya está; ignorar */ }
+}
+
+// GET /api/diagnosticos/:id/documentos — opcional ?categoria= para filtrar
 app.get('/api/diagnosticos/:id/documentos', verificarToken, async (req, res) => {
   const diagId = Number(req.params.id);
+  const categoria = req.query.categoria; // 'General' | 'Estándares' | 'Plan de Emergencias' | vacío = todos
   try {
-    const { rows } = await pool.query(
-      `SELECT id, categoria, nombre_original, tamano, tipo_mime, estado,
-              analisis_ia, calificaciones, brechas, created_at
-       FROM diagnostico_documentos WHERE diagnostico_id=$1 ORDER BY categoria, created_at`,
-      [diagId]
-    );
+    let sql = `SELECT id, categoria, nombre_original, tamano, tipo_mime, estado,
+                analisis_ia, calificaciones, brechas, created_at
+                FROM diagnostico_documentos WHERE diagnostico_id=$1`;
+    const params = [diagId];
+    if (categoria && CATEGORIAS_PSM.includes(categoria)) {
+      sql += ` AND categoria = $2`;
+      params.push(categoria);
+    }
+    sql += ` ORDER BY categoria, created_at`;
+    const { rows } = await pool.query(sql, params);
     res.json({ documentos: rows, categorias: CATEGORIAS_PSM });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // POST /api/diagnosticos/:id/documentos  – sube 1..N archivos
-// multer debe recibir el token ANTES de procesar archivos; usamos orden: verificarToken → upload
+// .any() acepta cualquier nombre de campo de archivo para evitar "Unexpected field" al subir varios
+const uploadDocumentosAny = multer({
+  storage: multerStorage,
+  limits: { fileSize: 25 * 1024 * 1024 },
+  fileFilter(_req, file, cb) {
+    const ok = ['application/pdf','image/jpeg','image/png','image/tiff',
+                 'application/vnd.ms-excel',
+                 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                 'application/msword',
+                 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+                 'text/plain'].includes(file.mimetype);
+    cb(null, ok);
+  },
+}).any();
+
 app.post(
   '/api/diagnosticos/:id/documentos',
   verificarToken,
-  upload.array('archivos', 10),
+  (req, res, next) => {
+    uploadDocumentosAny(req, res, (err) => {
+      if (err && err.code === 'LIMIT_UNEXPECTED_FILE') {
+        return res.status(400).json({ error: 'Campo de archivo no esperado.' });
+      }
+      if (err) return next(err);
+      next();
+    });
+  },
   async (req, res) => {
     const diagId = Number(req.params.id);
     const { categoria } = req.body;
     if (!categoria || !CATEGORIAS_PSM.includes(categoria)) {
       return res.status(400).json({ error: 'Categoría inválida.' });
     }
-    if (!req.files?.length) {
+    const files = Array.isArray(req.files) ? req.files.slice(0, 10) : [];
+    if (!files.length) {
       return res.status(400).json({ error: 'No se recibieron archivos.' });
     }
 
@@ -1259,7 +1658,7 @@ app.post(
     if (!diag) return res.status(404).json({ error: 'Diagnóstico no encontrado.' });
 
     const creados = [];
-    for (const file of req.files) {
+    for (const file of files) {
       // Extracción de texto asíncrona (no bloquea la respuesta)
       const texto = await extractText(file.path, file.mimetype);
       const { rows: [doc] } = await pool.query(
@@ -1313,16 +1712,23 @@ app.post('/api/diagnosticos/:id/documentos/:docId/analizar', verificarToken, asy
     );
     const nivel = diag?.nivel_calculado ?? 1;
 
-    // Preguntas normativas del alcance de este diagnóstico (max 30)
-    const { rows: preguntas } = await pool.query(
-      `SELECT p.elemento, p.pregunta, p.legislacion
-       FROM diagnostico_respuestas dr
-       JOIN preguntas p ON p.id = dr.pregunta_id
-       WHERE dr.diagnostico_id=$1 ORDER BY dr.orden LIMIT 30`,
-      [diagId]
-    );
-    const preguntasTexto = preguntas.length
-      ? preguntas.map(p => `• [${p.elemento ?? 'General'}] ${p.pregunta}${p.legislacion ? ` (${p.legislacion})` : ''}`).join('\n')
+    // Preguntas del alcance: exclusivamente desde snapshot si existe; si no, desde diagnostico_respuestas+preguntas
+    let preguntasAlcance;
+    const snapshot = await getPreguntasSnapshot(diagId);
+    if (snapshot.length > 0) {
+      preguntasAlcance = snapshot.map((s) => ({ id: s.pregunta_id, elemento: s.elemento_psm_nombre || 'General', pregunta: s.pregunta_texto }));
+    } else {
+      const { rows: pr } = await pool.query(
+        `SELECT p.id, p.elemento, p.pregunta, p.legislacion
+         FROM diagnostico_respuestas dr
+         JOIN preguntas p ON p.id = dr.pregunta_id
+         WHERE dr.diagnostico_id=$1 ORDER BY dr.orden LIMIT 30`,
+        [diagId]
+      );
+      preguntasAlcance = pr.map((p) => ({ id: p.id, elemento: p.elemento ?? 'General', pregunta: p.pregunta }));
+    }
+    const preguntasTexto = preguntasAlcance.length
+      ? preguntasAlcance.map((p, i) => `  ${i + 1}. [ID:${p.id}] [${p.elemento}] ${p.pregunta}`).join('\n')
       : 'No hay preguntas normativas registradas para este diagnóstico.';
 
     const textoDoc = doc.texto_extraido
@@ -1359,6 +1765,9 @@ Al analizar, verifica la consistencia interna del documento y señala:
 3. Si los procedimientos operacionales corresponden a los riesgos identificados.
 4. Si los registros de incidentes están vinculados a los análisis de riesgos.
 5. Cualquier contradicción o inconsistencia detectada dentro del documento.
+
+INSTRUCCIÓN ESTRICTA - TRIANGULACIÓN:
+Actúas como auditor PSM. Debes triangular la evidencia de este documento EXCLUSIVAMENTE para responder a las siguientes preguntas del alcance del diagnóstico. Devuelve en calificaciones el ID de la pregunta (pregunta_id), la evidencia encontrada y el nivel de cumplimiento. NO inventes preguntas fuera de esta lista. Solo puedes calificar preguntas que aparecen en la lista anterior.
 
 Genera únicamente JSON válido (sin bloques markdown) con esta estructura exacta:
 {
@@ -1411,9 +1820,14 @@ ${preguntasTexto}`;
     let rawResponse = '';
     try {
       rawResponse = await geminiAnalizar(prompt);
-      // Limpiar posibles bloques markdown que la IA añada
-      const clean = rawResponse.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
-      const parsed = JSON.parse(clean);
+      const { parsed, raw } = parseJsonFromGemini(rawResponse);
+      if (!parsed) {
+        await pool.query(
+          `UPDATE diagnostico_documentos SET estado='Analizado', analisis_ia=$1 WHERE id=$2`,
+          [rawResponse, docId]
+        );
+        return res.json({ ok: true, analisis: { analisis_tecnico: rawResponse, calificaciones: [], brechas_campo: [] } });
+      }
 
       // Calcular efectividad ponderada del documento
       const cals = parsed.calificaciones ?? [];
@@ -1446,15 +1860,18 @@ ${preguntasTexto}`;
       );
       res.json({ ok: true, analisis: { ...parsed, efectividad } });
     } catch (parseErr) {
-      // Si la IA no devolvió JSON válido, guardamos el texto plano
-      await pool.query(
-        `UPDATE diagnostico_documentos SET estado='Analizado', analisis_ia=$1 WHERE id=$2`,
-        [rawResponse, docId]
-      );
-      res.json({ ok: true, analisis: { analisis_tecnico: rawResponse, calificaciones: [], brechas_campo: [] } });
+      // Si algo falla tras el parse (p. ej. DB), intentar al menos guardar el texto plano
+      try {
+        await pool.query(
+          `UPDATE diagnostico_documentos SET estado='Analizado', analisis_ia=$1 WHERE id=$2`,
+          [rawResponse || '', docId]
+        );
+        return res.json({ ok: true, analisis: { analisis_tecnico: rawResponse || '', calificaciones: [], brechas_campo: [] } });
+      } catch (_) {}
+      throw parseErr;
     }
   } catch (err) {
-    await pool.query(`UPDATE diagnostico_documentos SET estado='Error' WHERE id=$1`, [docId]);
+    await pool.query(`UPDATE diagnostico_documentos SET estado='Error' WHERE id=$1`, [docId]).catch(() => {});
     console.error('[analizar doc]', err.message);
     res.status(500).json({ error: err.message });
   }
@@ -2027,9 +2444,8 @@ Responde SOLO en JSON válido:
 }`;
 
     const raw = await geminiAnalizar(prompt);
-    let resultado;
-    try { const m = raw.match(/\{[\s\S]*\}/); resultado = JSON.parse(m?.[0] ?? raw); }
-    catch { resultado = { inconsistencias:[], calificacion:'Escasa', severidad_global:'Medio', hallazgo_narrativo: raw, cultura_seguridad:'' }; }
+    const { parsed } = parseJsonFromGemini(raw);
+    const resultado = parsed || { inconsistencias:[], calificacion:'Escasa', severidad_global:'Medio', hallazgo_narrativo: raw, cultura_seguridad:'' };
 
     await pool.query(
       `UPDATE diagnostico_recorrido
@@ -2069,15 +2485,13 @@ app.delete('/api/diagnosticos/:id', verificarToken, async (req, res) => {
     );
     if (!diag) return res.status(404).json({ error: 'Diagnóstico no encontrado.' });
 
-    // Solo SuperAdmin/Consultor/AdminInquilino pueden borrar; Lector no
     if (req.usuario.rol === 'Lector') {
       return res.status(403).json({ error: 'Sin permiso para eliminar diagnósticos.' });
     }
-    // Los diagnósticos Finalizados son inmutables
     if (diag.estado === 'Finalizado' || diag.estado === 'Aprobado') {
       return res.status(403).json({ error: 'No se puede eliminar un diagnóstico ya finalizado.' });
     }
-    // Auditor solo puede borrar sus propios diagnósticos del mismo tenant
+
     const tid = tenantScope(req);
     if (tid && diag.tenant_id !== tid && req.usuario.rol !== 'SuperAdmin') {
       return res.status(403).json({ error: 'Sin permiso sobre este diagnóstico.' });
@@ -2268,6 +2682,7 @@ async function ensureDiagnosticoSetup() {
       )
     `).catch(() => {});
 
+
     // Tabla de desglose de dimensiones
     await pool.query(`
       CREATE TABLE IF NOT EXISTS diagnostico_setup (
@@ -2292,14 +2707,14 @@ async function ensureDiagnosticoSetup() {
       `ALTER TABLE diagnostico_setup ADD COLUMN IF NOT EXISTS comentarios_complejidad  TEXT`,
       `ALTER TABLE diagnostico_setup ADD COLUMN IF NOT EXISTS comentarios_exposicion   TEXT`,
     ]) { await pool.query(col).catch(() => {}); }
-    // Repositorio documental
+    // Repositorio documental — categoria: General | Estándares | Plan de Emergencias
     await pool.query(`
       CREATE TABLE IF NOT EXISTS diagnostico_documentos (
         id              SERIAL PRIMARY KEY,
         diagnostico_id  INTEGER NOT NULL REFERENCES diagnosticos(id) ON DELETE CASCADE,
         tenant_id       INTEGER,
         planta_id       INTEGER,
-        categoria       TEXT    NOT NULL,
+        categoria       TEXT    NOT NULL DEFAULT 'General',
         nombre_original TEXT    NOT NULL,
         nombre_archivo  TEXT    NOT NULL,
         ruta            TEXT    NOT NULL,
@@ -2386,6 +2801,87 @@ async function ensureDiagnosticoSetup() {
       `ALTER TABLE plan_accion_items ADD COLUMN IF NOT EXISTS notificaciones_activas BOOLEAN DEFAULT FALSE`,
     ]) { await pool.query(col).catch(() => {}); }
 
+    // ── Tabla 20 elementos PSM CCPS (para Radar de Madurez Dinámico) ─────────
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS elementos_psm_ccps (
+        id    SERIAL PRIMARY KEY,
+        nombre TEXT NOT NULL UNIQUE
+      )
+    `).catch(() => {});
+    const { rows: countEl } = await pool.query('SELECT COUNT(*) AS n FROM elementos_psm_ccps').catch(() => ({ rows: [{ n: 0 }] }));
+    if (parseInt(countEl?.[0]?.n || 0) === 0) {
+      const elementos = [
+        'Auditorías', 'Cultura de Seguridad', 'Integridad Mecánica', 'Gestión del Cambio',
+        'Participación del Trabajador', 'Conocimiento del Proceso', 'Procedimientos Operativos',
+        'Prácticas de Trabajo Seguro', 'Análisis de Riesgos', 'Gestión de Contratistas',
+        'Capacitación y Competencia', 'Preparación para Emergencias', 'Investigación de Incidentes',
+        'Cumplimiento de Normas', 'Métricas e Indicadores', 'Revisión por la Dirección',
+        'Alcance de las Partes Interesadas', 'Preparación Operativa', 'Conducción de Operaciones',
+        'Mejora Continua',
+      ];
+      for (let i = 0; i < elementos.length; i++) {
+        await pool.query(
+          'INSERT INTO elementos_psm_ccps (id, nombre) VALUES ($1, $2) ON CONFLICT (id) DO NOTHING',
+          [i + 1, elementos[i]]
+        ).catch(() => {});
+      }
+    }
+
+    // Snapshot inmutable de preguntas del alcance (Fase 1 OK → congelar; Fases 2-7 leen solo de aquí)
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS diagnostico_preguntas (
+        id                     SERIAL PRIMARY KEY,
+        diagnostico_id         INTEGER NOT NULL REFERENCES diagnosticos(id) ON DELETE CASCADE,
+        pregunta_id           INTEGER NOT NULL,
+        pregunta_texto        TEXT NOT NULL,
+        elemento_psm_id       INTEGER REFERENCES elementos_psm_ccps(id) ON DELETE SET NULL,
+        elemento_psm_nombre   TEXT,
+        orden                 INTEGER NOT NULL DEFAULT 0,
+        respuesta_ia_docs    JSONB,
+        respuesta_ia_entrevistas JSONB,
+        conclusion_final      TEXT,
+        validado_auditor      BOOLEAN DEFAULT FALSE,
+        created_at            TIMESTAMP DEFAULT NOW(),
+        UNIQUE(diagnostico_id, pregunta_id)
+      )
+    `).catch(() => {});
+
+    // Columnas para Radar de Madurez Dinámico (plan_accion_items)
+    for (const col of [
+      `ALTER TABLE plan_accion_items ADD COLUMN IF NOT EXISTS impacto_puntaje DOUBLE PRECISION DEFAULT 0`,
+      `ALTER TABLE plan_accion_items ADD COLUMN IF NOT EXISTS completada BOOLEAN DEFAULT FALSE`,
+      `ALTER TABLE plan_accion_items ADD COLUMN IF NOT EXISTS elemento_psm_id INTEGER REFERENCES elementos_psm_ccps(id) ON DELETE SET NULL`,
+    ]) { await pool.query(col).catch(() => {}); }
+
+    // Maker-Checker: estado de aprobación (PENDIENTE | EN_REVISION | CERRADA | RECHAZADA)
+    await pool.query(`
+      ALTER TABLE plan_accion_items
+      ADD COLUMN IF NOT EXISTS estado_aprobacion VARCHAR(20) NOT NULL DEFAULT 'PENDIENTE'
+    `).catch(() => {});
+    await pool.query(`
+      UPDATE plan_accion_items SET estado_aprobacion = 'CERRADA' WHERE completada = true
+    `).catch(() => {});
+
+    await pool.query(`
+      ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS rol VARCHAR(80)
+    `).catch(() => {});
+
+    // Actualizar CHECK de rol para permitir los 5 roles nuevos (y legacy durante transición)
+    await pool.query(`ALTER TABLE usuarios DROP CONSTRAINT IF EXISTS usuarios_rol_check`).catch(() => {});
+    await pool.query(`
+      ALTER TABLE usuarios ADD CONSTRAINT usuarios_rol_check CHECK (rol IN (
+        'SuperAdmin','Consultor','AdminInquilino','Auditor','Lector',
+        'admin_cliente','operativo_n1','verificador_n2','consultor_skudo','ejecutivo_lectura'
+      ))
+    `).catch(() => {});
+
+    // Maker-Checker: campos de justificación, evidencia y comentario del aprobador
+    for (const col of [
+      `ALTER TABLE plan_accion_items ADD COLUMN IF NOT EXISTS justificacion_operativo TEXT`,
+      `ALTER TABLE plan_accion_items ADD COLUMN IF NOT EXISTS evidencia_texto TEXT`,
+      `ALTER TABLE plan_accion_items ADD COLUMN IF NOT EXISTS comentario_aprobador TEXT`,
+    ]) { await pool.query(col).catch(() => {}); }
+
     // ── Tabla de log de notificaciones enviadas ────────────────────────────
     await pool.query(`
       CREATE TABLE IF NOT EXISTS plan_accion_notif_log (
@@ -2419,6 +2915,7 @@ async function ensureDiagnosticoSetup() {
       )
     `).catch(() => {});
 
+    await ensureDocumentosCategoriaDefault();
     console.log('[setup] Tablas de workflow listas.');
   } catch (err) {
     console.warn('[setup] Error en ensureDiagnosticoSetup:', err.message);
@@ -2429,97 +2926,176 @@ async function ensureDiagnosticoSetup() {
 // 🔍 FASE 5: AUDITORÍA EXPERTA CON TRIANGULACIÓN DE EVIDENCIAS
 // ═══════════════════════════════════════════════════════════════════════════════
 
-// GET /api/diagnosticos/:id/questions - Obtener preguntas filtradas por complejidad
+// Helper: rellenar diagnostico_preguntas desde diagnostico_respuestas (misma lógica que confirmar-alcance). No lanza si no hay alcance.
+async function asegurarSnapshotDesdeAlcance(diagId) {
+  const { rows: [diag] } = await pool.query('SELECT estado FROM diagnosticos WHERE id = $1', [diagId]);
+  if (!diag || diag.estado === 'Finalizado' || diag.estado === 'Aprobado') return 0;
+  const { rows: alcance } = await pool.query(
+    `SELECT dr.pregunta_id, dr.orden, p.pregunta, p.elemento
+     FROM diagnostico_respuestas dr
+     JOIN preguntas p ON p.id = dr.pregunta_id
+     WHERE dr.diagnostico_id = $1
+     ORDER BY dr.orden ASC, dr.pregunta_id ASC`,
+    [diagId]
+  );
+  if (!alcance.length) return 0;
+  const catalog = await getElementosPsmCatalog();
+  await pool.query('DELETE FROM diagnostico_preguntas WHERE diagnostico_id = $1', [diagId]);
+  for (const a of alcance) {
+    const resolved = resolveBySimilarity(a.elemento, catalog) || resolveElementoPsm({ elemento: a.elemento }, catalog);
+    await pool.query(
+      `INSERT INTO diagnostico_preguntas (diagnostico_id, pregunta_id, pregunta_texto, elemento_psm_id, elemento_psm_nombre, orden)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       ON CONFLICT (diagnostico_id, pregunta_id) DO UPDATE SET
+         pregunta_texto = EXCLUDED.pregunta_texto,
+         elemento_psm_id = EXCLUDED.elemento_psm_id,
+         elemento_psm_nombre = EXCLUDED.elemento_psm_nombre,
+         orden = EXCLUDED.orden`,
+      [diagId, a.pregunta_id, a.pregunta || '', resolved?.id ?? null, resolved?.nombre ?? a.elemento ?? null, a.orden ?? 0]
+    );
+  }
+  return alcance.length;
+}
+
+// GET /api/diagnosticos/:id/questions - Obtener preguntas para Fase 6 (Auditoría Experta). Si hay snapshot (alcance confirmado), solo devuelve esas preguntas.
 app.get('/api/diagnosticos/:id/questions', verificarToken, async (req, res) => {
   const diagId = parseInt(req.params.id);
-  const { complexity } = req.query; // level del diagnóstico
-  
+  const { complexity } = req.query;
+
   try {
-    // Obtener el nivel calculado del diagnóstico si no se especifica
+    let snapshot = await getPreguntasSnapshot(diagId);
+
+    // Si no hay snapshot pero sí hay alcance en diagnostico_respuestas, crearlo ahora (fallback por si no se pulsó "Confirmar alcance")
+    if (snapshot.length === 0) {
+      const creadas = await asegurarSnapshotDesdeAlcance(diagId);
+      if (creadas > 0) {
+        snapshot = await getPreguntasSnapshot(diagId);
+        console.log(`[Fase6] Snapshot creado automáticamente para diagnóstico #${diagId}: ${snapshot.length} preguntas.`);
+      }
+    }
+
+    if (snapshot.length > 0) {
+      // Regla de oro: Fase 6 usa exclusivamente el snapshot (mismo número de preguntas que en Fase 2)
+      const preguntaIds = snapshot.map((s) => s.pregunta_id);
+      const { rows: hitlRows } = await pool.query(
+        `SELECT pregunta_id, calificacion_ia, calificacion_humano, criterio_profesional, override_justificacion, validado_en
+         FROM diagnostico_validaciones_hitl WHERE diagnostico_id = $1 AND pregunta_id = ANY($2)`,
+        [diagId, preguntaIds]
+      );
+      const hitlByPreg = Object.fromEntries(hitlRows.map((r) => [Number(r.pregunta_id), r]));
+
+      const { rows: docs } = await pool.query(
+        `SELECT id, nombre_original, categoria, texto_extraido, analisis_ia, estado, calificaciones
+         FROM diagnostico_documentos WHERE diagnostico_id = $1 AND estado = 'Analizado'`,
+        [diagId]
+      );
+
+      // Evidencias por pregunta en una sola pasada (evitar N+1)
+      const { rows: todasEnt } = await pool.query(
+        `SELECT id, participante, cargo, transcripcion, analisis_ia, duracion_seg FROM diagnostico_entrevistas WHERE diagnostico_id = $1`,
+        [diagId]
+      );
+      const { rows: todasRec } = await pool.query(
+        `SELECT id, area, categoria, observacion, hallazgo, analisis_ia FROM diagnostico_recorrido WHERE diagnostico_id = $1`,
+        [diagId]
+      );
+
+      const preguntasConEvidencia = snapshot.map((s, idx) => {
+        const elementoNombre = (s.elemento_psm_nombre || s.pregunta_texto?.slice(0, 50) || '').toLowerCase();
+        const evidencia_documentos = docs
+          .filter((d) => {
+            const cals = Array.isArray(d.calificaciones) ? d.calificaciones : [];
+            const menciona = cals.some((c) => (c.pregunta_id !== undefined && c.pregunta_id === s.pregunta_id) || (typeof c.pregunta === 'string' && (s.pregunta_texto || '').slice(0, 80).includes((c.pregunta || '').slice(0, 80))));
+            if (menciona) return true;
+            const analisis = (d.analisis_ia || '').toLowerCase();
+            const texto = (d.texto_extraido || '').toLowerCase();
+            return elementoNombre && (analisis.includes(elementoNombre.slice(0, 25)) || texto.includes(elementoNombre.slice(0, 25)));
+          })
+          .map((d) => ({ id: d.id, tipo: 'documento', fuente: d.nombre_original, categoria: d.categoria, fragmento: (d.texto_extraido || '').slice(0, 300), analisis: d.analisis_ia, estado: d.estado }));
+        const evidencia_entrevistas = todasEnt
+          .filter((e) => (e.analisis_ia || '').toLowerCase().includes(elementoNombre.slice(0, 25)) || (e.transcripcion || '').toLowerCase().includes(elementoNombre.slice(0, 25)))
+          .map((e) => ({ id: e.id, tipo: 'entrevista', fuente: e.participante || 'Sin nombre', cargo: e.cargo, fragmento: (e.transcripcion || '').slice(0, 300), analisis: e.analisis_ia, duracion: e.duracion_seg }));
+        const evidencia_campo = todasRec
+          .filter((r) => (r.analisis_ia || '').toLowerCase().includes(elementoNombre.slice(0, 25)) || (r.observacion || '').toLowerCase().includes(elementoNombre.slice(0, 25)) || (r.hallazgo || '').toLowerCase().includes(elementoNombre.slice(0, 25)))
+          .map((r) => ({ id: r.id, tipo: 'recorrido', fuente: r.area || 'Sin área', categoria: r.categoria, fragmento: (r.observacion || r.hallazgo || '').slice(0, 300), analisis: r.analisis_ia }));
+        const vh = hitlByPreg[Number(s.pregunta_id)] || {};
+        const p = {
+          id: s.pregunta_id,
+          complejidad: null,
+          elemento: s.elemento_psm_nombre || '',
+          pregunta: s.pregunta_texto,
+          evidencia_documentos,
+          evidencia_entrevistas,
+          evidencia_campo,
+          calificacion_ia: vh.calificacion_ia,
+          calificacion_humano: vh.calificacion_humano,
+          criterio_profesional: vh.criterio_profesional,
+          override_justificacion: vh.override_justificacion,
+          validado_en: vh.validado_en,
+        };
+        return {
+          ...p,
+          sugerencia_ia: calcularSugerenciaIA(p),
+          conteo_evidencias: {
+            documentos: evidencia_documentos.length,
+            entrevistas: evidencia_entrevistas.length,
+            campo: evidencia_campo.length,
+            total: evidencia_documentos.length + evidencia_entrevistas.length + evidencia_campo.length,
+          },
+        };
+      });
+
+      return res.json({
+        diagnostico_id: diagId,
+        nivel_complejidad: 'Alcance confirmado (snapshot)',
+        total_preguntas: preguntasConEvidencia.length,
+        preguntas: preguntasConEvidencia,
+      });
+    }
+
+    // Sin snapshot: comportamiento legacy (preguntas por complejidad desde tabla preguntas)
     let nivelFiltro = complexity;
     if (!nivelFiltro) {
       const { rows: [diag] } = await pool.query(
         'SELECT nivel_calculado FROM diagnosticos WHERE id = $1', [diagId]
       );
-      nivelFiltro = diag?.nivel_calculado || 'Medio';
+      nivelFiltro = diag?.nivel_calculado || 2;
     }
-
-    // Mapear nivel a complejidad de preguntas
-    const complejidadMap = {
-      'Bajo': [1],
-      'Medio': [1, 2], 
-      'Alto': [1, 2, 3]
-    };
+    const complejidadMap = { 1: [1], 2: [1, 2], 3: [1, 2, 3], 4: [1, 2, 3, 4], 5: [1, 2, 3, 4, 5] };
     const complejidadesPermitidas = complejidadMap[nivelFiltro] || [1, 2];
 
-    // Obtener preguntas filtradas con evidencias trianguladas (sin DISTINCT sobre json)
     const { rows: preguntas } = await pool.query(`
       SELECT
         p.id, p.complejidad, p.elemento, p.pregunta,
         p.evidencia_suficiente, p.evidencia_escasa, p.evidencia_al_menos, p.evidencia_no_evidencia,
-
-        -- Evidencias de documentos (subconsulta para evitar DISTINCT sobre json)
         COALESCE((
           SELECT jsonb_agg(jsonb_build_object(
-            'id',        dd.id,
-            'tipo',      'documento',
-            'fuente',    dd.nombre_original,
-            'categoria', dd.categoria,
-            'fragmento', LEFT(COALESCE(dd.texto_extraido, ''), 300),
-            'analisis',  dd.analisis_ia,
-            'estado',    dd.estado
+            'id', dd.id, 'tipo', 'documento', 'fuente', dd.nombre_original, 'categoria', dd.categoria,
+            'fragmento', LEFT(COALESCE(dd.texto_extraido, ''), 300), 'analisis', dd.analisis_ia, 'estado', dd.estado
           ))
           FROM diagnostico_documentos dd
-          WHERE dd.diagnostico_id = $1
-            AND dd.estado = 'Analizado'
-            AND (dd.analisis_ia ILIKE '%' || p.elemento || '%'
-              OR dd.texto_extraido ILIKE '%' || p.elemento || '%')
+          WHERE dd.diagnostico_id = $1 AND dd.estado = 'Analizado'
+            AND (dd.analisis_ia ILIKE '%' || p.elemento || '%' OR dd.texto_extraido ILIKE '%' || p.elemento || '%')
         ), '[]'::jsonb) AS evidencia_documentos,
-
-        -- Evidencias de entrevistas
         COALESCE((
           SELECT jsonb_agg(jsonb_build_object(
-            'id',        de.id,
-            'tipo',      'entrevista',
-            'fuente',    COALESCE(de.participante, 'Sin nombre'),
-            'cargo',     de.cargo,
-            'fragmento', LEFT(COALESCE(de.transcripcion, ''), 300),
-            'analisis',  de.analisis_ia,
-            'duracion',  de.duracion_seg
+            'id', de.id, 'tipo', 'entrevista', 'fuente', COALESCE(de.participante, 'Sin nombre'), 'cargo', de.cargo,
+            'fragmento', LEFT(COALESCE(de.transcripcion, ''), 300), 'analisis', de.analisis_ia, 'duracion', de.duracion_seg
           ))
           FROM diagnostico_entrevistas de
-          WHERE de.diagnostico_id = $1
-            AND (de.analisis_ia ILIKE '%' || p.elemento || '%'
-              OR de.transcripcion ILIKE '%' || p.elemento || '%')
+          WHERE de.diagnostico_id = $1 AND (de.analisis_ia ILIKE '%' || p.elemento || '%' OR de.transcripcion ILIKE '%' || p.elemento || '%')
         ), '[]'::jsonb) AS evidencia_entrevistas,
-
-        -- Evidencias de campo
         COALESCE((
           SELECT jsonb_agg(jsonb_build_object(
-            'id',        dr.id,
-            'tipo',      'recorrido',
-            'fuente',    COALESCE(dr.area, 'Sin área'),
-            'categoria', dr.categoria,
-            'fragmento', LEFT(COALESCE(dr.observacion, dr.hallazgo, ''), 300),
-            'analisis',  dr.analisis_ia
+            'id', dr.id, 'tipo', 'recorrido', 'fuente', COALESCE(dr.area, 'Sin área'), 'categoria', dr.categoria,
+            'fragmento', LEFT(COALESCE(dr.observacion, dr.hallazgo, ''), 300), 'analisis', dr.analisis_ia
           ))
           FROM diagnostico_recorrido dr
-          WHERE dr.diagnostico_id = $1
-            AND (dr.analisis_ia ILIKE '%' || p.elemento || '%'
-              OR dr.observacion ILIKE '%' || p.elemento || '%')
+          WHERE dr.diagnostico_id = $1 AND (dr.analisis_ia ILIKE '%' || p.elemento || '%' OR dr.observacion ILIKE '%' || p.elemento || '%')
         ), '[]'::jsonb) AS evidencia_campo,
-
-        -- Validación HITL existente
-        vh.calificacion_ia,
-        vh.calificacion_humano,
-        vh.criterio_profesional,
-        vh.override_justificacion,
-        vh.validado_en
-
+        vh.calificacion_ia, vh.calificacion_humano, vh.criterio_profesional, vh.override_justificacion, vh.validado_en
       FROM preguntas p
-      LEFT JOIN diagnostico_validaciones_hitl vh
-        ON vh.diagnostico_id = $1 AND vh.pregunta_id = p.id
-
+      LEFT JOIN diagnostico_validaciones_hitl vh ON vh.diagnostico_id = $1 AND vh.pregunta_id = p.id
       WHERE p.complejidad = ANY($2)
       ORDER BY p.complejidad ASC, p.elemento ASC
     `, [diagId, complejidadesPermitidas]);
@@ -2528,22 +3104,17 @@ app.get('/api/diagnosticos/:id/questions', verificarToken, async (req, res) => {
       diagnostico_id: diagId,
       nivel_complejidad: nivelFiltro,
       total_preguntas: preguntas.length,
-      preguntas: preguntas.map(p => ({
+      preguntas: preguntas.map((p) => ({
         ...p,
-        // Calcular sugerencia de IA basada en evidencias disponibles
         sugerencia_ia: calcularSugerenciaIA(p),
-        // Contar evidencias por tipo
         conteo_evidencias: {
           documentos: (p.evidencia_documentos || []).length,
-          entrevistas: (p.evidencia_entrevistas || []).length, 
+          entrevistas: (p.evidencia_entrevistas || []).length,
           campo: (p.evidencia_campo || []).length,
-          total: (p.evidencia_documentos || []).length + 
-                 (p.evidencia_entrevistas || []).length + 
-                 (p.evidencia_campo || []).length
-        }
-      }))
+          total: (p.evidencia_documentos || []).length + (p.evidencia_entrevistas || []).length + (p.evidencia_campo || []).length,
+        },
+      })),
     });
-
   } catch (error) {
     console.error('[Fase5] Error obteniendo preguntas:', error);
     res.status(500).json({ error: 'Error interno del servidor' });
@@ -2611,6 +3182,43 @@ app.post('/api/diagnosticos/:id/validate-fase5', verificarToken, async (req, res
   } catch (error) {
     console.error('[Fase5] Error en validación HITL:', error);
     res.status(500).json({ error: 'Error interno del servidor' });
+  }
+});
+
+// POST /api/diagnosticos/:id/validar-todas-ia — (temporal) Acepta todas las sugerencias IA como validadas
+app.post('/api/diagnosticos/:id/validar-todas-ia', verificarToken, async (req, res) => {
+  const diagId = parseInt(req.params.id);
+  const validadorId = req.usuario.id;
+  try {
+    let snapshot = await getPreguntasSnapshot(diagId);
+    if (snapshot.length === 0) {
+      await asegurarSnapshotDesdeAlcance(diagId);
+      snapshot = await getPreguntasSnapshot(diagId);
+    }
+    if (snapshot.length === 0) {
+      return res.status(400).json({ error: 'No hay preguntas en el alcance. Confirma el alcance en Fase 2 o abre primero el cuestionario.' });
+    }
+    let validadas = 0;
+    for (const s of snapshot) {
+      const calificacionIA = await calcularCalificacionIA(diagId, s.pregunta_id);
+      await pool.query(`
+        INSERT INTO diagnostico_validaciones_hitl
+          (diagnostico_id, pregunta_id, calificacion_ia, calificacion_humano, criterio_profesional, override_justificacion, validado_por, evidencia_docs, evidencia_entrev, evidencia_campo)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, '[]'::jsonb, '[]'::jsonb, '[]'::jsonb)
+        ON CONFLICT (diagnostico_id, pregunta_id) DO UPDATE SET
+          calificacion_ia = EXCLUDED.calificacion_ia,
+          calificacion_humano = EXCLUDED.calificacion_humano,
+          criterio_profesional = COALESCE(diagnostico_validaciones_hitl.criterio_profesional, 'Aceptada sugerencia IA (validación automática)'),
+          validado_por = $7,
+          validado_en = NOW()
+      `, [diagId, s.pregunta_id, calificacionIA, calificacionIA, 'Aceptada sugerencia IA (validación automática)', null, validadorId]);
+      validadas++;
+    }
+    console.log(`[Fase6] Validación automática: ${validadas} preguntas aceptadas por sugerencia IA en diagnóstico #${diagId}.`);
+    res.json({ ok: true, validadas });
+  } catch (err) {
+    console.error('[validar-todas-ia]', err.message);
+    res.status(500).json({ error: err.message });
   }
 });
 
@@ -2706,7 +3314,86 @@ async function calcularCalificacionIA(diagId, preguntaId) {
 // 📋 PLAN DE ACCIÓN
 // ═══════════════════════════════════════════════════════════════════════════════
 
-// GET /api/plan-accion — listar todos los ítems del tenant
+// GET /api/elementos-psm — lista de elementos PSM CCPS (para dropdown del Plan de Acción)
+app.get('/api/elementos-psm', verificarToken, async (req, res) => {
+  try {
+    const { rows } = await pool.query(`
+      SELECT id, nombre FROM elementos_psm_ccps ORDER BY id ASC
+    `);
+    res.json(rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Catálogo en memoria para validación (se rellena desde BD)
+let cacheElementosPsm = null;
+async function getElementosPsmCatalog() {
+  if (cacheElementosPsm) return cacheElementosPsm;
+  const { rows } = await pool.query('SELECT id, nombre FROM elementos_psm_ccps ORDER BY id ASC');
+  cacheElementosPsm = rows;
+  return cacheElementosPsm;
+}
+
+// Resuelve elemento_psm (texto) o elemento_psm_id (número) a { id, nombre } válido del catálogo. Fallback: id 20 (Mejora Continua)
+function resolveElementoPsm(item, catalog, fallbackId = 20) {
+  const fallback = catalog.find((e) => e.id === fallbackId) || catalog[catalog.length - 1] || { id: 20, nombre: 'Mejora Continua' };
+  if (!catalog.length) return fallback;
+  const id = item.elemento_psm_id != null && item.elemento_psm_id !== '' ? parseInt(item.elemento_psm_id, 10) : null;
+  if (id >= 1 && id <= 20) {
+    const byId = catalog.find((e) => e.id === id);
+    if (byId) return byId;
+  }
+  const name = (item.elemento_psm || item.elemento || '').trim();
+  if (!name) return fallback;
+  const exact = catalog.find((e) => e.nombre === name);
+  if (exact) return exact;
+  const lower = name.toLowerCase();
+  const byName = catalog.find((e) => e.nombre.toLowerCase() === lower);
+  if (byName) return byName;
+  const normalized = name.normalize('NFD').replace(/\p{Diacritic}/gu, '');
+  const byNorm = catalog.find((e) => e.nombre.normalize('NFD').replace(/\p{Diacritic}/gu, '').toLowerCase() === normalized.toLowerCase());
+  if (byNorm) return byNorm;
+  return fallback;
+}
+
+// Mapeo por similitud (keywords → nombre exacto del catálogo) para limpieza de datos históricos
+const SIMILITUD_ELEMENTOS = [
+  { keywords: ['mantenimiento', 'mecánica', 'integridad mecánica', 'equipos'], nombre: 'Integridad Mecánica' },
+  { keywords: ['auditoría', 'auditorias', 'auditoria'], nombre: 'Auditorías' },
+  { keywords: ['cultura', 'seguridad'], nombre: 'Cultura de Seguridad' },
+  { keywords: ['riesgo', 'hazop', 'lopa', 'análisis de riesgos'], nombre: 'Análisis de Riesgos' },
+  { keywords: ['emergencia', 'evacuación', 'preparación para emergencias'], nombre: 'Preparación para Emergencias' },
+  { keywords: ['capacitación', 'competencia', 'capacitacion', 'entrenamiento'], nombre: 'Capacitación y Competencia' },
+  { keywords: ['cumplimiento', 'normas', 'estándares', 'regulatorio'], nombre: 'Cumplimiento de Normas' },
+  { keywords: ['mejora continua', 'mejora'], nombre: 'Mejora Continua' },
+  { keywords: ['procedimiento', 'operativo', 'sop'], nombre: 'Procedimientos Operativos' },
+  { keywords: ['contratista', 'contratistas'], nombre: 'Gestión de Contratistas' },
+  { keywords: ['incidente', 'investigación'], nombre: 'Investigación de Incidentes' },
+  { keywords: ['dirección', 'revisión por la dirección'], nombre: 'Revisión por la Dirección' },
+  { keywords: ['métrica', 'indicador', 'kpi'], nombre: 'Métricas e Indicadores' },
+  { keywords: ['cambio', 'gestión del cambio'], nombre: 'Gestión del Cambio' },
+  { keywords: ['trabajador', 'participación'], nombre: 'Participación del Trabajador' },
+  { keywords: ['conocimiento del proceso', 'proceso'], nombre: 'Conocimiento del Proceso' },
+  { keywords: ['trabajo seguro', 'prácticas'], nombre: 'Prácticas de Trabajo Seguro' },
+  { keywords: ['partes interesadas', 'alcance'], nombre: 'Alcance de las Partes Interesadas' },
+  { keywords: ['preparación operativa', 'operativa'], nombre: 'Preparación Operativa' },
+  { keywords: ['conducción', 'operaciones'], nombre: 'Conducción de Operaciones' },
+];
+
+function resolveBySimilarity(texto, catalog) {
+  if (!texto || !catalog.length) return null;
+  const lower = (texto || '').toLowerCase().normalize('NFD').replace(/\p{Diacritic}/gu, '');
+  for (const { keywords, nombre } of SIMILITUD_ELEMENTOS) {
+    if (keywords.some((k) => lower.includes(k.toLowerCase().normalize('NFD').replace(/\p{Diacritic}/gu, '')))) {
+      const found = catalog.find((e) => e.nombre === nombre);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+// GET /api/plan-accion — listar todos los ítems del tenant (incluye elemento_psm_id y elemento_psm_nombre)
 app.get('/api/plan-accion', verificarToken, async (req, res) => {
   try {
     const tid = tenantScope(req);
@@ -2722,11 +3409,13 @@ app.get('/api/plan-accion', verificarToken, async (req, res) => {
       SELECT pa.*,
              u.nombre  AS creado_por_nombre,
              d.estado  AS diag_estado,
-             p.nombre  AS planta_nombre
+             p.nombre  AS planta_nombre,
+             ep.nombre AS elemento_psm_nombre
       FROM plan_accion_items pa
       LEFT JOIN usuarios  u ON u.id = pa.creado_por
       LEFT JOIN diagnosticos d ON d.id = pa.diagnostico_id
       LEFT JOIN plantas   p ON p.id = d.planta_id
+      LEFT JOIN elementos_psm_ccps ep ON ep.id = pa.elemento_psm_id
       WHERE ${where.join(' AND ')}
       ORDER BY
         CASE pa.criticidad
@@ -2739,34 +3428,37 @@ app.get('/api/plan-accion', verificarToken, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// POST /api/plan-accion — crear ítem manual
+// POST /api/plan-accion — crear ítem manual (elemento_psm_id obligatorio)
 app.post('/api/plan-accion', verificarToken, async (req, res) => {
   const { nombre, descripcion, responsable, responsable_email, fecha_limite,
-          criticidad, estado, diagnostico_id, origen_ia, plazo_ia, elemento_psm,
+          criticidad, estado, diagnostico_id, origen_ia, plazo_ia, elemento_psm, elemento_psm_id,
           notificaciones_activas } = req.body;
   if (!nombre?.trim()) return res.status(400).json({ error: 'El nombre es obligatorio.' });
+  const psmId = elemento_psm_id != null && elemento_psm_id !== '' ? parseInt(elemento_psm_id) : null;
+  if (psmId == null || psmId < 1 || psmId > 20) return res.status(400).json({ error: 'Debe asignar un Elemento PSM.' });
   try {
     const tid = tenantScope(req);
-    const { rows: [item] } = await pool.query(`
+      const { rows: [item] } = await pool.query(`
       INSERT INTO plan_accion_items
         (tenant_id, diagnostico_id, nombre, descripcion, responsable, responsable_email,
          fecha_limite, criticidad, estado, notificaciones_activas,
-         origen_ia, plazo_ia, elemento_psm, creado_por)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+         origen_ia, plazo_ia, elemento_psm, elemento_psm_id, creado_por)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
       RETURNING *
     `, [tid, diagnostico_id || null, nombre.trim(), descripcion || null,
         responsable || null, responsable_email || null, fecha_limite || null,
         criticidad || 'Medio', estado || 'Pendiente', notificaciones_activas || false,
-        origen_ia || false, plazo_ia || null, elemento_psm || null, req.usuario.id]);
+        origen_ia || false, plazo_ia || null, elemento_psm || null, psmId, req.usuario.id]);
     res.json(item);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// POST /api/plan-accion/importar-ia/:diagId — importar plan_accion del análisis IA
+// POST /api/plan-accion/importar-ia/:diagId — importar plan_accion del análisis IA (valida elemento PSM y asigna elemento_psm_id)
 app.post('/api/plan-accion/importar-ia/:diagId', verificarToken, async (req, res) => {
   const diagId = parseInt(req.params.diagId);
   try {
     const tid = tenantScope(req);
+    const catalog = await getElementosPsmCatalog();
     const { rows: [diag] } = await pool.query(
       'SELECT analisis_final_ia, planta_id FROM diagnosticos WHERE id=$1', [diagId]
     );
@@ -2777,11 +3469,9 @@ app.post('/api/plan-accion/importar-ia/:diagId', verificarToken, async (req, res
       ? JSON.parse(diag.analisis_final_ia) : diag.analisis_final_ia;
 
     const planIA = analisis.plan_accion || [];
-    const hallazgos = analisis.hallazgos_criticos || [];
 
     if (planIA.length === 0) return res.status(400).json({ error: 'El análisis IA no tiene plan de acción.' });
 
-    // Mapear plazo a criticidad
     const plazoCriticidad = {
       'Inmediato': 'Crítico', '30 días': 'Alto', '90 días': 'Medio', '6 meses': 'Bajo'
     };
@@ -2789,40 +3479,84 @@ app.post('/api/plan-accion/importar-ia/:diagId', verificarToken, async (req, res
     const creados = [];
     for (const item of planIA) {
       const criticidad = plazoCriticidad[item.plazo] || 'Medio';
-      // Buscar elemento PSM relacionado desde hallazgos
-      const hallazgo = hallazgos.find((_, i) => i === (item.prioridad - 1));
+      const resolved = resolveElementoPsm(item, catalog);
+      const nombreCorto = (item.accion || '').substring(0, 80);
+      const nombreItem = `Acción ${item.prioridad ?? creados.length + 1}: ${nombreCorto}`;
+
       const { rows: [nuevo] } = await pool.query(`
         INSERT INTO plan_accion_items
           (tenant_id, diagnostico_id, nombre, descripcion, responsable, criticidad,
-           estado, origen_ia, plazo_ia, elemento_psm, notificaciones_activas, creado_por)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+           estado, origen_ia, plazo_ia, elemento_psm, elemento_psm_id, notificaciones_activas, creado_por)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
         RETURNING *
-      `, [tid, diagId, `Acción ${item.prioridad}: ${item.accion?.substring(0, 80)}`,
-          item.accion, item.responsable || null, criticidad,
-          'Pendiente', true, item.plazo || null,
-          hallazgo?.elemento || null, false, req.usuario.id]);
+      `, [tid, diagId, nombreItem, item.accion || null, item.responsable || null, criticidad,
+          'Pendiente', true, item.plazo || null, resolved.nombre, resolved.id, false, req.usuario.id]);
       creados.push(nuevo);
     }
     res.json({ importados: creados.length, items: creados });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// PATCH /api/plan-accion/:id — actualizar ítem
+const ESTADOS_APROBACION = ['PENDIENTE', 'EN_REVISION', 'CERRADA', 'RECHAZADA'];
+const ROL_OPERATIVO_N1 = 'operativo_n1';
+const ROLES_QUE_PUEDEN_APROBAR = ['verificador_n2', 'consultor_skudo', 'admin_cliente', 'SuperAdmin', 'AdminInquilino', 'Consultor'];
+
+// PATCH /api/plan-accion/:id — actualizar ítem (elemento_psm_id obligatorio si se envía). Acepta estado_aprobacion (Maker-Checker).
 app.patch('/api/plan-accion/:id', verificarToken, async (req, res) => {
   const id = parseInt(req.params.id);
+  const rol = (req.usuario?.rol || '').trim();
   const { nombre, descripcion, responsable, responsable_email, fecha_limite,
-          criticidad, estado, elemento_psm, notificaciones_activas } = req.body;
+          criticidad, estado, elemento_psm, notificaciones_activas, completada, impacto_puntaje, elemento_psm_id, estado_aprobacion,
+          justificacion_operativo, evidencia_texto, comentario_aprobador } = req.body;
+  if (elemento_psm_id !== undefined && elemento_psm_id !== null && elemento_psm_id !== '') {
+    const psmId = parseInt(elemento_psm_id);
+    if (isNaN(psmId) || psmId < 1 || psmId > 20) return res.status(400).json({ error: 'Elemento PSM debe ser un id entre 1 y 20.' });
+  }
+  if (estado_aprobacion != null && !ESTADOS_APROBACION.includes(String(estado_aprobacion).toUpperCase())) {
+    return res.status(400).json({ error: `estado_aprobacion debe ser uno de: ${ESTADOS_APROBACION.join(', ')}` });
+  }
+  const aprobacionVal = estado_aprobacion != null ? String(estado_aprobacion).toUpperCase() : null;
+  if (aprobacionVal === 'CERRADA') {
+    if (rol === ROL_OPERATIVO_N1) {
+      return res.status(403).json({ error: 'El rol operativo_n1 no puede aprobar (CERRADA) tareas. Solo verificadores o administradores pueden cerrar.' });
+    }
+    if (rol === 'ejecutivo_lectura') {
+      return res.status(403).json({ error: 'El rol ejecutivo_lectura es solo de consulta; no puede aprobar tareas.' });
+    }
+    if (rol && !ROLES_QUE_PUEDEN_APROBAR.includes(rol)) {
+      return res.status(403).json({ error: 'Su rol no tiene permiso para aprobar (CERRADA) tareas del Plan de Acción.' });
+    }
+  }
+  const completadaVal = completada ?? (estado === 'Completado');
   try {
     const { rows: [item] } = await pool.query(`
       UPDATE plan_accion_items
       SET nombre=$1, descripcion=$2, responsable=$3, responsable_email=$4,
           fecha_limite=$5, criticidad=$6, estado=$7, elemento_psm=$8,
-          notificaciones_activas=$9, updated_at=NOW()
-      WHERE id=$10
+          notificaciones_activas=$9,
+          completada = CASE WHEN $10::text IS NOT NULL THEN ($10 = 'CERRADA') ELSE $11 END,
+          estado_aprobacion = COALESCE($10, estado_aprobacion),
+          justificacion_operativo = COALESCE($12, justificacion_operativo),
+          evidencia_texto = COALESCE($13, evidencia_texto),
+          comentario_aprobador = COALESCE($14, comentario_aprobador),
+          updated_at=NOW(),
+          impacto_puntaje = COALESCE($15, impacto_puntaje),
+          elemento_psm_id = COALESCE($16, elemento_psm_id)
+      WHERE id=$17
       RETURNING *
-    `, [nombre, descripcion || null, responsable || null, responsable_email || null,
-        fecha_limite || null, criticidad, estado, elemento_psm || null,
-        notificaciones_activas ?? false, id]);
+    `, [
+      nombre, descripcion || null, responsable || null, responsable_email || null,
+      fecha_limite || null, criticidad, estado, elemento_psm || null,
+      notificaciones_activas ?? false,
+      aprobacionVal,
+      completadaVal,
+      justificacion_operativo != null ? String(justificacion_operativo).trim() || null : null,
+      evidencia_texto != null ? String(evidencia_texto).trim() || null : null,
+      comentario_aprobador != null ? String(comentario_aprobador).trim() || null : null,
+      impacto_puntaje != null ? impacto_puntaje : null,
+      elemento_psm_id != null ? elemento_psm_id : null,
+      id,
+    ]);
     if (!item) return res.status(404).json({ error: 'Ítem no encontrado.' });
     // Si se desactivaron notificaciones, limpiar log para reenviar cuando se reactive
     if (!notificaciones_activas) {
@@ -2849,6 +3583,83 @@ app.delete('/api/plan-accion/:id', verificarToken, async (req, res) => {
     res.json({ ok: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
+
+// GET /api/admin/limpiar-elementos-huerfanos/preview — vista previa de ítems huérfanos (sin modificar)
+app.get(
+  '/api/admin/limpiar-elementos-huerfanos/preview',
+  verificarToken,
+  verificarRol('SuperAdmin', 'AdminInquilino'),
+  async (req, res) => {
+    try {
+      const { rows } = await pool.query(`
+        SELECT pa.id, pa.nombre, pa.elemento_psm, pa.elemento_psm_id
+        FROM plan_accion_items pa
+        LEFT JOIN elementos_psm_ccps ep ON ep.id = pa.elemento_psm_id
+        WHERE ep.id IS NULL
+      `);
+      res.json({ total: rows.length, items: rows });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  }
+);
+
+// POST /api/admin/limpiar-elementos-huerfanos — corrige ítems con elemento_psm_id NULL o inválido (solo SuperAdmin/AdminInquilino)
+app.post(
+  '/api/admin/limpiar-elementos-huerfanos',
+  verificarToken,
+  verificarRol('SuperAdmin', 'AdminInquilino'),
+  async (req, res) => {
+    try {
+      const catalog = await getElementosPsmCatalog();
+      const fallbackId = 14; // Cumplimiento de Normas como genérico
+      const fallback = catalog.find((e) => e.id === fallbackId) || catalog.find((e) => e.id === 20) || catalog[catalog.length - 1];
+
+      const { rows: huerfanos } = await pool.query(`
+        SELECT pa.id, pa.elemento_psm, pa.elemento_psm_id
+        FROM plan_accion_items pa
+        LEFT JOIN elementos_psm_ccps ep ON ep.id = pa.elemento_psm_id
+        WHERE ep.id IS NULL
+      `);
+
+      let actualizados = 0;
+      const detalle = [];
+
+      for (const row of huerfanos) {
+        const item = { elemento_psm: row.elemento_psm, elemento_psm_id: row.elemento_psm_id };
+        const porSimilitud = resolveBySimilarity(row.elemento_psm, catalog);
+        const resolved = porSimilitud || resolveElementoPsm(item, catalog, fallbackId);
+        const nombreFinal = resolved.nombre;
+        const idFinal = resolved.id;
+
+        await pool.query(
+          `UPDATE plan_accion_items SET elemento_psm_id = $1, elemento_psm = $2 WHERE id = $3`,
+          [idFinal, nombreFinal, row.id]
+        );
+        actualizados++;
+        detalle.push({
+          id: row.id,
+          texto_anterior: row.elemento_psm || '(vacío)',
+          asignado: nombreFinal,
+          elemento_psm_id: idFinal,
+          por_similitud: !!porSimilitud,
+        });
+      }
+
+      if (cacheElementosPsm) cacheElementosPsm = null;
+      console.log(`[ADMIN] Limpieza elementos huérfanos: ${actualizados} ítems actualizados.`);
+      res.json({
+        ok: true,
+        mensaje: `Se corrigieron ${actualizados} registro(s) con elemento PSM inválido o ausente.`,
+        actualizados,
+        detalle,
+      });
+    } catch (err) {
+      console.error('[ADMIN] limpiar-elementos-huerfanos:', err.message);
+      res.status(500).json({ error: err.message });
+    }
+  }
+);
 
 // GET /api/plan-accion/diagnosticos-finalizados — lista de diags con análisis IA para importar
 app.get('/api/plan-accion/diagnosticos-finalizados', verificarToken, async (req, res) => {
@@ -2894,9 +3705,192 @@ app.get('/api/diagnosticos/:id/analisis', verificarToken, async (req, res) => {
   }
 });
 
+// GET /api/diagnosticos/:id/radar — mismo cálculo que dashboard/madurez pero para un diagnóstico concreto (base + plan_accion)
+app.get('/api/diagnosticos/:id/radar', verificarToken, async (req, res) => {
+  const diagId = parseInt(req.params.id);
+  try {
+    const tid = tenantScope(req);
+    const { rows: [diag] } = await pool.query(
+      `SELECT d.id, d.nivel_calculado, p.nombre AS planta_nombre, a.nombre AS area_nombre
+       FROM diagnosticos d
+       LEFT JOIN plantas p ON p.id = d.planta_id
+       LEFT JOIN areas a ON a.id = d.area_id
+       WHERE d.id = $1 ${tid ? 'AND d.tenant_id = $2' : ''}`,
+      tid ? [diagId, tid] : [diagId]
+    );
+    if (!diag) return res.status(404).json({ error: 'Diagnóstico no encontrado' });
+
+    const { rows: catalog } = await pool.query('SELECT id, nombre FROM elementos_psm_ccps ORDER BY id ASC');
+    const elementos20 = catalog.length ? catalog : Array.from({ length: 20 }, (_, i) => ({ id: i + 1, nombre: `Elemento ${i + 1}` }));
+
+    const basePorNombre = {};
+    const basePorPsmId = {};
+    const snapshotRadar = await getPreguntasSnapshot(diagId);
+    if (snapshotRadar.length > 0) {
+      // 1) Base desde respuestas del cuestionario (Fase 2) — así el radar refleja el mismo criterio que el puntaje del diagnóstico
+      const { rows: aggDr } = await pool.query(`
+        SELECT dp.elemento_psm_id, dp.elemento_psm_nombre,
+               COUNT(*) AS total,
+               SUM(CASE WHEN dr.respuesta = 'Suficiente' THEN 3 WHEN dr.respuesta = 'Escasa' THEN 2 WHEN dr.respuesta = 'Al menos una' THEN 1 ELSE 0 END) AS puntos
+        FROM diagnostico_preguntas dp
+        LEFT JOIN diagnostico_respuestas dr ON dr.diagnostico_id = dp.diagnostico_id AND dr.pregunta_id = dp.pregunta_id
+        WHERE dp.diagnostico_id = $1 AND dp.elemento_psm_id IS NOT NULL
+        GROUP BY dp.elemento_psm_id, dp.elemento_psm_nombre
+      `, [diagId]);
+      for (const r of aggDr) {
+        const total = parseInt(r.total) || 0;
+        const puntos = parseInt(r.puntos) || 0;
+        const nombre = (r.elemento_psm_nombre || '').trim() || `Elemento ${r.elemento_psm_id}`;
+        const puntaje = total > 0 ? Math.min(100, Math.round((puntos / (total * 3)) * 100)) : 0;
+        basePorNombre[nombre] = { puntaje, total, puntos };
+        basePorPsmId[parseInt(r.elemento_psm_id)] = basePorNombre[nombre];
+      }
+      // 2) Sobrescribir con validaciones HITL (Fase 6) solo cuando haya al menos una validación para ese elemento
+      const { rows: agg } = await pool.query(`
+        SELECT dp.elemento_psm_id, dp.elemento_psm_nombre,
+               COUNT(*) AS total,
+               COUNT(vh.pregunta_id) AS hitl_count,
+               SUM(CASE WHEN COALESCE(vh.calificacion_humano, vh.calificacion_ia) = 'Suficiente' THEN 3
+                        WHEN COALESCE(vh.calificacion_humano, vh.calificacion_ia) = 'Escasa' THEN 2
+                        WHEN COALESCE(vh.calificacion_humano, vh.calificacion_ia) = 'Al menos una' THEN 1 ELSE 0 END) AS puntos
+        FROM diagnostico_preguntas dp
+        LEFT JOIN diagnostico_validaciones_hitl vh ON vh.diagnostico_id = dp.diagnostico_id AND vh.pregunta_id = dp.pregunta_id
+        WHERE dp.diagnostico_id = $1 AND dp.elemento_psm_id IS NOT NULL
+        GROUP BY dp.elemento_psm_id, dp.elemento_psm_nombre
+      `, [diagId]);
+      for (const r of agg) {
+        const hitlCount = parseInt(r.hitl_count) || 0;
+        if (hitlCount === 0) continue; // sin validaciones HITL para este elemento, mantener base de respuestas
+        const total = parseInt(r.total) || 0;
+        const puntos = parseInt(r.puntos) || 0;
+        const nombre = (r.elemento_psm_nombre || '').trim() || `Elemento ${r.elemento_psm_id}`;
+        const puntaje = total > 0 ? Math.min(100, Math.round((puntos / (total * 3)) * 100)) : 0;
+        basePorNombre[nombre] = { puntaje, total, puntos };
+        basePorPsmId[parseInt(r.elemento_psm_id)] = basePorNombre[nombre];
+      }
+    } else {
+      const { rows: hitl } = await pool.query(`
+        SELECT p.elemento, COUNT(*) AS total,
+               SUM(CASE WHEN COALESCE(vh.calificacion_humano, vh.calificacion_ia) = 'Suficiente' THEN 3
+                        WHEN COALESCE(vh.calificacion_humano, vh.calificacion_ia) = 'Escasa' THEN 2
+                        WHEN COALESCE(vh.calificacion_humano, vh.calificacion_ia) = 'Al menos una' THEN 1 ELSE 0 END) AS puntos
+        FROM preguntas p
+        LEFT JOIN diagnostico_validaciones_hitl vh ON vh.pregunta_id = p.id AND vh.diagnostico_id = $1
+        WHERE p.elemento IS NOT NULL AND p.elemento != ''
+        GROUP BY p.elemento
+      `, [diagId]);
+      if (hitl.length > 0) {
+        for (const r of hitl) {
+          const total = parseInt(r.total) || 0;
+          const puntos = parseInt(r.puntos) || 0;
+          basePorNombre[r.elemento?.trim() || ''] = { puntaje: total > 0 ? Math.min(100, Math.round((puntos / (total * 3)) * 100)) : 0, total, puntos };
+        }
+      } else {
+        const { rows: resp } = await pool.query(`
+          SELECT p.elemento, COUNT(*) AS total,
+                 SUM(CASE WHEN dr.respuesta = 'Suficiente' THEN 3 WHEN dr.respuesta = 'Escasa' THEN 2 WHEN dr.respuesta = 'Al menos una' THEN 1 ELSE 0 END) AS puntos
+          FROM preguntas p
+          LEFT JOIN diagnostico_respuestas dr ON dr.pregunta_id = p.id AND dr.diagnostico_id = $1
+          WHERE p.elemento IS NOT NULL AND p.elemento != ''
+          GROUP BY p.elemento
+        `, [diagId]);
+        for (const r of resp) {
+          const total = parseInt(r.total) || 0;
+          const puntos = parseInt(r.puntos) || 0;
+          basePorNombre[r.elemento?.trim() || ''] = { puntaje: total > 0 ? Math.min(100, Math.round((puntos / (total * 3)) * 100)) : 0, total, puntos };
+        }
+      }
+    }
+
+    // Por elemento_psm_id: total_acciones y acciones_completadas (solo estado_aprobacion = 'CERRADA' para Radar)
+    const accionesPorPsmId = {};
+    const { rows: accionesRadar } = await pool.query(`
+      SELECT elemento_psm_id,
+             COUNT(*) AS total_acciones,
+             SUM(CASE WHEN estado_aprobacion = 'CERRADA' THEN 1 ELSE 0 END)::int AS acciones_completadas
+      FROM plan_accion_items
+      WHERE diagnostico_id = $1 AND elemento_psm_id IS NOT NULL
+      GROUP BY elemento_psm_id
+    `, [diagId]);
+    for (const row of accionesRadar) {
+      const id = parseInt(row.elemento_psm_id);
+      if (id >= 1 && id <= 20) {
+        accionesPorPsmId[id] = {
+          total_acciones: parseInt(row.total_acciones) || 0,
+          acciones_completadas: parseInt(row.acciones_completadas) || 0,
+        };
+      }
+    }
+
+    const findBase = (nombreCatalog) => {
+      if (basePorNombre[nombreCatalog]) return basePorNombre[nombreCatalog];
+      const key = Object.keys(basePorNombre).find((k) => k.trim().toLowerCase() === (nombreCatalog || '').trim().toLowerCase());
+      return key ? basePorNombre[key] : { puntaje: 0, total: 0, puntos: 0 };
+    };
+    const elementosPuntaje = elementos20.map((ep) => {
+      const base = (snapshotRadar.length > 0 && basePorPsmId[ep.id]) ? basePorPsmId[ep.id] : findBase(ep.nombre);
+      const puntajeBase = Math.min(100, base.puntaje || 0);
+      const acc = accionesPorPsmId[ep.id] || { total_acciones: 0, acciones_completadas: 0 };
+      const { total_acciones, acciones_completadas } = acc;
+      let puntajeFinal = puntajeBase;
+      if (total_acciones > 0 && acciones_completadas > 0) {
+        const incremento = ((100 - puntajeBase) / total_acciones) * acciones_completadas;
+        puntajeFinal = Math.min(100, Math.round(puntajeBase + incremento));
+      }
+      return {
+        elemento: nombreEstandarRadar(ep.nombre),
+        puntaje: puntajeFinal,
+        total: base.total || 0,
+        puntos: base.puntos || 0,
+        total_acciones: total_acciones,
+        acciones_completadas: acciones_completadas,
+      };
+    });
+
+    let totalPuntos = elementosPuntaje.reduce((s, e) => s + (e.puntos ?? 0), 0);
+    let maxPosible = elementosPuntaje.reduce((s, e) => s + (e.total || 0) * 3, 0);
+    let madurezGlobal = maxPosible > 0 ? Math.round((totalPuntos / maxPosible) * 100) : Math.round(elementosPuntaje.reduce((a, e) => a + e.puntaje, 0) / Math.max(1, elementosPuntaje.length));
+
+    // Si el cálculo da 0% pero el diagnóstico tiene puntaje guardado (ej. 21% al finalizar), usar ese valor
+    if (madurezGlobal === 0) {
+      const { rows: [row] } = await pool.query(
+        'SELECT analisis_final_ia, puntuacion FROM diagnosticos WHERE id = $1',
+        [diagId]
+      );
+      const stored = row?.puntuacion ?? (row?.analisis_final_ia && typeof row.analisis_final_ia === 'object' ? row.analisis_final_ia.puntaje_global : null) ?? (typeof row?.analisis_final_ia === 'string' ? (() => { try { const j = JSON.parse(row.analisis_final_ia); return j.puntaje_global; } catch { return null; } })() : null);
+      if (stored != null && !isNaN(stored)) {
+        const pct = Math.min(100, Math.max(0, Math.round(Number(stored))));
+        madurezGlobal = pct;
+        for (let i = 0; i < elementosPuntaje.length; i++) {
+          elementosPuntaje[i] = { ...elementosPuntaje[i], puntaje: pct };
+        }
+      }
+    }
+
+    const nivelMadurez = madurezGlobal >= 80 ? 'Optimizado' : madurezGlobal >= 60 ? 'Gestionado' : madurezGlobal >= 40 ? 'Definido' : madurezGlobal >= 20 ? 'En Desarrollo' : 'Inicial';
+
+    res.json({
+      diagnostico_id: diagId,
+      planta: diag.planta_nombre,
+      area: diag.area_nombre,
+      nivel_calculado: diag.nivel_calculado,
+      madurez_global: madurezGlobal,
+      nivel_madurez: nivelMadurez,
+      elementos: elementosPuntaje,
+      total_elementos: elementosPuntaje.length,
+    });
+  } catch (err) {
+    console.error('[GET /api/diagnosticos/:id/radar]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.post('/api/diagnosticos/:id/finalizar', verificarToken, async (req, res) => {
   const diagId = parseInt(req.params.id);
   try {
+    const elementosCatalog = await getElementosPsmCatalog();
+    const listaElementosStr = elementosCatalog.map((e) => `  ${e.id}. ${e.nombre}`).join('\n');
+
     // ── Recopilar todo el contexto del diagnóstico ─────────────────────────
     const { rows: [diag] } = await pool.query(`
       SELECT d.*, p.nombre AS planta_nombre, a.nombre AS area_nombre,
@@ -2909,16 +3903,34 @@ app.post('/api/diagnosticos/:id/finalizar', verificarToken, async (req, res) => 
     `, [diagId]);
     if (!diag) return res.status(404).json({ error: 'Diagnóstico no encontrado' });
 
-    // Preguntas con validaciones HITL
-    const { rows: preguntas } = await pool.query(`
-      SELECT p.elemento, p.pregunta, p.complejidad,
-             dr.respuesta, dr.comentario,
-             vh.calificacion_humano, vh.calificacion_ia, vh.criterio_profesional
-      FROM preguntas p
-      LEFT JOIN diagnostico_respuestas dr ON dr.pregunta_id = p.id AND dr.diagnostico_id = $1
-      LEFT JOIN diagnostico_validaciones_hitl vh ON vh.pregunta_id = p.id AND vh.diagnostico_id = $1
-      ORDER BY p.complejidad, p.elemento
-    `, [diagId]);
+    // Preguntas: desde snapshot si existe (regla de oro); si no, desde preguntas+dr+hitl
+    let preguntas;
+    const snapshotPreg = await getPreguntasSnapshot(diagId);
+    if (snapshotPreg.length > 0) {
+      const { rows: conHitl } = await pool.query(`
+        SELECT dp.pregunta_id AS id, dp.pregunta_texto AS pregunta, dp.elemento_psm_nombre AS elemento, dp.elemento_psm_id,
+               dr.respuesta, dr.comentario,
+               vh.calificacion_humano, vh.calificacion_ia, vh.criterio_profesional
+        FROM diagnostico_preguntas dp
+        LEFT JOIN diagnostico_respuestas dr ON dr.diagnostico_id = dp.diagnostico_id AND dr.pregunta_id = dp.pregunta_id
+        LEFT JOIN diagnostico_validaciones_hitl vh ON vh.diagnostico_id = dp.diagnostico_id AND vh.pregunta_id = dp.pregunta_id
+        WHERE dp.diagnostico_id = $1
+        ORDER BY dp.orden, dp.id
+      `, [diagId]);
+      preguntas = conHitl.map((r) => ({ ...r, elemento: r.elemento || 'General' }));
+    } else {
+      const { rows: fromP } = await pool.query(`
+        SELECT p.id, p.elemento, p.pregunta, p.complejidad,
+               dr.respuesta, dr.comentario,
+               vh.calificacion_humano, vh.calificacion_ia, vh.criterio_profesional
+        FROM preguntas p
+        LEFT JOIN diagnostico_respuestas dr ON dr.pregunta_id = p.id AND dr.diagnostico_id = $1
+        LEFT JOIN diagnostico_validaciones_hitl vh ON vh.pregunta_id = p.id AND vh.diagnostico_id = $1
+        WHERE EXISTS (SELECT 1 FROM diagnostico_respuestas dr2 WHERE dr2.diagnostico_id = $1 AND dr2.pregunta_id = p.id)
+        ORDER BY p.complejidad, p.elemento
+      `, [diagId]);
+      preguntas = fromP;
+    }
 
     // No conformidades
     const noConf = preguntas.filter(p => {
@@ -2945,6 +3957,13 @@ app.post('/api/diagnosticos/:id/finalizar', verificarToken, async (req, res) => 
 
     const prompt = `Actúa como Auditor Senior en Seguridad de Procesos (PSM) bajo Decreto 1347 de 2021 (Colombia) y los 20 elementos CCPS.
 
+CATÁLOGO OFICIAL DE ELEMENTOS PSM (OBLIGATORIO — NO INVENTES NOMBRES):
+Debes usar EXACTAMENTE uno de estos 20 elementos por cada hallazgo y por cada ítem del plan de acción. No uses sinónimos ni variaciones.
+
+${listaElementosStr}
+
+IMPORTANTE: Para cada acción generada en plan_accion, debes clasificarla OBLIGATORIAMENTE dentro de uno de los 20 elementos exactos listados arriba. No inventes categorías nuevas ni uses sinónimos. Devuelve siempre el nombre exacto tal como aparece en la lista.
+
 DATOS DEL DIAGNÓSTICO:
 - Empresa: ${diag.empresa_nombre || 'No especificada'}
 - Planta: ${diag.planta_nombre || 'No especificada'} / Área: ${diag.area_nombre || 'No especificada'}
@@ -2962,45 +3981,53 @@ INSTRUCCIÓN: Genera un análisis ejecutivo profesional en español con los sigu
 
 1. **DIAGNÓSTICO GENERAL**: Párrafo de 3-4 oraciones sobre el estado de madurez PSM de la organización basado en el puntaje (${puntaje}%).
 
-2. **HALLAZGOS CRÍTICOS**: Lista de los 3-5 elementos PSM más críticos identificados, con su nivel de riesgo (Alto/Medio/Bajo) y descripción del impacto.
+2. **HALLAZGOS CRÍTICOS**: Lista de los 3-5 elementos PSM más críticos. El campo "elemento" DEBE ser exactamente uno del catálogo de 20 elementos listado arriba (copia el nombre tal cual).
 
 3. **BRECHAS NORMATIVAS**: Lista de los incumplimientos específicos del Decreto 1347/2021 y Resolución 5492/2024 detectados.
 
 4. **FORTALEZAS IDENTIFICADAS**: 2-3 áreas donde la organización demuestra buen nivel de cumplimiento.
 
-5. **PLAN DE ACCIÓN PRIORITARIO**: Los 5 pasos más urgentes que la organización debe tomar, ordenados por prioridad, con plazo sugerido (inmediato/30 días/90 días/6 meses).
+5. **PLAN DE ACCIÓN PRIORITARIO**: Los 5 pasos más urgentes. Para CADA ítem del plan_accion DEBES asignar "elemento_psm" con el nombre EXACTO de uno de los 20 elementos del catálogo (copia el string tal cual). NO inventes nombres ni uses sinónimos. Opcionalmente incluye "elemento_psm_id" (número del 1 al 20) según la lista. Plazo: uno de "Inmediato" | "30 días" | "90 días" | "6 meses".
 
 6. **CONCLUSIÓN**: Párrafo de cierre con la calificación general del diagnóstico.
 
-Responde SOLO en JSON con esta estructura exacta:
+Responde ÚNICAMENTE con un JSON válido (sin markdown ni texto adicional) con esta estructura exacta:
 {
   "diagnostico_general": "texto...",
-  "hallazgos_criticos": [{"elemento": "...", "riesgo": "Alto|Medio|Bajo", "descripcion": "...", "impacto": "..."}],
+  "hallazgos_criticos": [{"elemento": "nombre exacto del catálogo", "riesgo": "Alto|Medio|Bajo", "descripcion": "...", "impacto": "..."}],
   "brechas_normativas": ["texto brecha 1", "texto brecha 2"],
   "fortalezas": ["fortaleza 1", "fortaleza 2"],
-  "plan_accion": [{"prioridad": 1, "accion": "...", "plazo": "Inmediato|30 días|90 días|6 meses", "responsable": "..."}],
+  "plan_accion": [
+    {"prioridad": 1, "accion": "...", "plazo": "Inmediato|30 días|90 días|6 meses", "responsable": "...", "elemento_psm": "nombre exacto del catálogo", "elemento_psm_id": 1}
+  ],
   "conclusion": "texto...",
   "puntaje_global": ${puntaje},
   "nivel_riesgo_general": "Alto|Medio|Bajo|Crítico"
 }`;
 
     const raw = await geminiAnalizar(prompt);
-    let analisis;
-    try {
-      const clean = raw.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
-      const m = clean.match(/\{[\s\S]*\}/);
-      analisis = JSON.parse(m?.[0] ?? clean);
-    } catch {
-      analisis = {
-        diagnostico_general: raw,
-        hallazgos_criticos: [],
-        brechas_normativas: [],
-        fortalezas: [],
-        plan_accion: [],
-        conclusion: '',
-        puntaje_global: puntaje,
-        nivel_riesgo_general: puntaje >= 75 ? 'Bajo' : puntaje >= 50 ? 'Medio' : 'Alto',
-      };
+    const { parsed } = parseJsonFromGemini(raw);
+    const analisis = parsed || {
+      diagnostico_general: raw,
+      hallazgos_criticos: [],
+      brechas_normativas: [],
+      fortalezas: [],
+      plan_accion: [],
+      conclusion: '',
+      puntaje_global: puntaje,
+      nivel_riesgo_general: puntaje >= 75 ? 'Bajo' : puntaje >= 50 ? 'Medio' : 'Alto',
+    };
+
+    // Validar y normalizar plan_accion: cada ítem debe tener elemento_psm y elemento_psm_id del catálogo (fallback si la IA alucina)
+    if (Array.isArray(analisis.plan_accion) && elementosCatalog.length) {
+      analisis.plan_accion = analisis.plan_accion.map((item) => {
+        const resolved = resolveElementoPsm(item, elementosCatalog);
+        return {
+          ...item,
+          elemento_psm: resolved.nombre,
+          elemento_psm_id: resolved.id,
+        };
+      });
     }
 
     // Persistir análisis y cambiar estado a Finalizado
@@ -3357,15 +4384,56 @@ app.get('/api/diagnosticos/:id/reporte', verificarToken, async (req, res) => {
   }
 });
 
+// Mapeo de nombres de BD / preguntas a nombres estándar para el radar (etiquetas cortas y consistentes)
+const MAP_ELEMENTO_A_ESTANDAR = {
+  'Análisis de Riesgos de Proceso (PHA)': 'Análisis de Riesgos',
+  'Auditorías': 'Auditorías',
+  'Competencias en Seguridad de Procesos': 'Capacitación y Competencia',
+  'Conducción de las Operaciones': 'Conducción de Operaciones',
+  'Cultura de Seguridad de Procesos': 'Cultura de Seguridad',
+  'Cumplimiento con Normas y Estándares': 'Cumplimiento de Normas',
+  'Divulgación a grupos de interés': 'Alcance de las Partes Interesadas',
+  'Formación y aseguramiento del desempeño': 'Capacitación y Competencia',
+  'Gestión del cambio': 'Gestión del Cambio',
+  'Información de Seguridad del Proceso (PSI)': 'Conocimiento del Proceso',
+  'Integridad Mecánica (MI)': 'Integridad Mecánica',
+  'Investigación de incidentes': 'Investigación de Incidentes',
+  'Medición, monitoreo y métricas del desempeño': 'Métricas e Indicadores',
+  'Participación de los trabajadores': 'Participación del Trabajador',
+  'Permisos de trabajo': 'Prácticas de Trabajo Seguro',
+  'Preparación operacional': 'Preparación Operativa',
+  'Preparación y respuesta ante emergencias': 'Preparación para Emergencias',
+  'Procedimientos de operación': 'Procedimientos Operativos',
+  'Revisión por la Gerencia y Mejora Continua': 'Revisión por la Dirección',
+  'Seguridad de contratistas': 'Gestión de Contratistas',
+};
+
+function nombreEstandarRadar(nombreDb) {
+  if (!nombreDb) return nombreDb;
+  const t = nombreDb.trim();
+  if (MAP_ELEMENTO_A_ESTANDAR[t]) return MAP_ELEMENTO_A_ESTANDAR[t];
+  const lower = t.toLowerCase();
+  for (const [k, v] of Object.entries(MAP_ELEMENTO_A_ESTANDAR)) {
+    if (k.toLowerCase() === lower) return v;
+  }
+  return nombreDb;
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
-// 📊 DASHBOARD — RADAR DE MADUREZ PSM
-// GET /api/dashboard/madurez — puntaje por elemento PSM del último diagnóstico
+// 📊 DASHBOARD — RADAR DE MADUREZ PSM (cálculo dinámico: base + plan_accion por elemento_psm_id)
+// GET /api/dashboard/madurez — puntaje base por elemento + impacto de plan_accion_items (cap 100%)
 app.get('/api/dashboard/madurez', verificarToken, async (req, res) => {
   try {
     const tid = tenantScope(req);
     const { planta_id } = req.query;
 
-    // Buscar el diagnóstico más reciente finalizado (o el último con respuestas)
+    // 1) Catálogo de los 20 elementos PSM (id, nombre) desde BD para mapeo base/impacto
+    const { rows: catalog } = await pool.query(
+      'SELECT id, nombre FROM elementos_psm_ccps ORDER BY id ASC'
+    );
+    const elementos20 = catalog.length ? catalog : Array.from({ length: 20 }, (_, i) => ({ id: i + 1, nombre: `Elemento ${i + 1}` }));
+
+    // 2) Diagnóstico de referencia: el más reciente finalizado (o el último) del tenant/planta
     let diagQuery = `
       SELECT d.id, d.nivel_calculado,
              p.nombre AS planta_nombre, a.nombre AS area_nombre
@@ -3383,10 +4451,9 @@ app.get('/api/dashboard/madurez', verificarToken, async (req, res) => {
     const diagParams = [tid, planta_id].filter(Boolean);
     const { rows: [diag] } = await pool.query(diagQuery, diagParams);
 
-    // Calcular puntajes por elemento PSM desde respuestas
-    let elementosPuntaje = [];
+    // 3) Puntaje base por elemento (por nombre): desde HITL o respuestas del cuestionario
+    const basePorNombre = {};
     if (diag) {
-      // Puntajes desde validaciones HITL (más precisos)
       const { rows: hitl } = await pool.query(`
         SELECT p.elemento,
                COUNT(*) AS total,
@@ -3399,18 +4466,19 @@ app.get('/api/dashboard/madurez', verificarToken, async (req, res) => {
           ON vh.pregunta_id = p.id AND vh.diagnostico_id = $1
         WHERE p.elemento IS NOT NULL AND p.elemento != ''
         GROUP BY p.elemento
-        ORDER BY p.elemento
       `, [diag.id]);
 
       if (hitl.length > 0) {
-        elementosPuntaje = hitl.map(r => ({
-          elemento: r.elemento,
-          puntaje:  r.total > 0 ? Math.round((r.puntos / (r.total * 3)) * 100) : 0,
-          total:    parseInt(r.total),
-          puntos:   parseInt(r.puntos),
-        }));
+        for (const r of hitl) {
+          const total = parseInt(r.total) || 0;
+          const puntos = parseInt(r.puntos) || 0;
+          basePorNombre[r.elemento?.trim() || ''] = {
+            puntaje: total > 0 ? Math.min(100, Math.round((puntos / (total * 3)) * 100)) : 0,
+            total,
+            puntos,
+          };
+        }
       } else {
-        // Fallback: desde respuestas del cuestionario
         const { rows: resp } = await pool.query(`
           SELECT p.elemento,
                  COUNT(*) AS total,
@@ -3419,44 +4487,81 @@ app.get('/api/dashboard/madurez', verificarToken, async (req, res) => {
                           WHEN dr.respuesta = 'Al menos una' THEN 1
                           ELSE 0 END) AS puntos
           FROM preguntas p
-          LEFT JOIN diagnostico_respuestas dr
-            ON dr.pregunta_id = p.id AND dr.diagnostico_id = $1
+          LEFT JOIN diagnostico_respuestas dr ON dr.pregunta_id = p.id AND dr.diagnostico_id = $1
           WHERE p.elemento IS NOT NULL AND p.elemento != ''
           GROUP BY p.elemento
-          ORDER BY p.elemento
         `, [diag.id]);
-
-        elementosPuntaje = resp.map(r => ({
-          elemento: r.elemento,
-          puntaje:  r.total > 0 ? Math.round((r.puntos / (r.total * 3)) * 100) : 0,
-          total:    parseInt(r.total),
-          puntos:   parseInt(r.puntos),
-        }));
+        for (const r of resp) {
+          const total = parseInt(r.total) || 0;
+          const puntos = parseInt(r.puntos) || 0;
+          basePorNombre[r.elemento?.trim() || ''] = {
+            puntaje: total > 0 ? Math.min(100, Math.round((puntos / (total * 3)) * 100)) : 0,
+            total,
+            puntos,
+          };
+        }
       }
     }
 
-    // Si no hay datos de diagnóstico, devolver elementos PSM con puntaje 0
-    if (elementosPuntaje.length === 0) {
-      const { rows: elementos } = await pool.query(
-        `SELECT DISTINCT elemento FROM preguntas
-         WHERE elemento IS NOT NULL AND elemento != ''
-         ORDER BY elemento`
-      );
-      elementosPuntaje = elementos.map(e => ({ elemento: e.elemento, puntaje: 0, total: 0, puntos: 0 }));
+    // 4) Por elemento_psm_id: total_acciones y acciones_completadas (solo estado_aprobacion = 'CERRADA')
+    let accionesPorPsmId = {};
+    if (diag?.id) {
+      const { rows: accionesRadar } = await pool.query(`
+        SELECT elemento_psm_id,
+               COUNT(*) AS total_acciones,
+               SUM(CASE WHEN estado_aprobacion = 'CERRADA' THEN 1 ELSE 0 END)::int AS acciones_completadas
+        FROM plan_accion_items
+        WHERE diagnostico_id = $1 AND elemento_psm_id IS NOT NULL
+        GROUP BY elemento_psm_id
+      `, [diag.id]);
+      for (const row of accionesRadar) {
+        const id = parseInt(row.elemento_psm_id);
+        if (id >= 1 && id <= 20) {
+          accionesPorPsmId[id] = {
+            total_acciones: parseInt(row.total_acciones) || 0,
+            acciones_completadas: parseInt(row.acciones_completadas) || 0,
+          };
+        }
+      }
     }
 
-    // Calcular índice global de madurez
-    const totalPuntos  = elementosPuntaje.reduce((s, e) => s + e.puntos, 0);
-    const maxPosible   = elementosPuntaje.reduce((s, e) => s + e.total * 3, 0);
-    const madurezGlobal = maxPosible > 0 ? Math.round((totalPuntos / maxPosible) * 100) : 0;
+    // 5) Construir los 20 elementos: puntaje_base + ((100 - puntaje_base) / total_acciones) * acciones_completadas (división por cero evitada)
+    const findBase = (nombreCatalog) => {
+      if (basePorNombre[nombreCatalog]) return basePorNombre[nombreCatalog];
+      const key = Object.keys(basePorNombre).find((k) => k.trim().toLowerCase() === (nombreCatalog || '').trim().toLowerCase());
+      return key ? basePorNombre[key] : { puntaje: 0, total: 0, puntos: 0 };
+    };
+    const elementosPuntaje = elementos20.map((ep) => {
+      const base = findBase(ep.nombre);
+      const puntajeBase = Math.min(100, base.puntaje || 0);
+      const acc = accionesPorPsmId[ep.id] || { total_acciones: 0, acciones_completadas: 0 };
+      const { total_acciones, acciones_completadas } = acc;
+      let puntajeFinal = puntajeBase;
+      if (total_acciones > 0 && acciones_completadas > 0) {
+        const incremento = ((100 - puntajeBase) / total_acciones) * acciones_completadas;
+        puntajeFinal = Math.min(100, Math.round(puntajeBase + incremento));
+      }
+      return {
+        elemento: nombreEstandarRadar(ep.nombre),
+        puntaje:  puntajeFinal,
+        total:    base.total || 0,
+        puntos:   base.puntos || 0,
+        total_acciones:    total_acciones,
+        acciones_completadas: acciones_completadas,
+      };
+    });
 
-    // Nivel de madurez semántico
+    // 6) Índice global y nivel
+    const totalPuntos  = elementosPuntaje.reduce((s, e) => s + (e.puntos ?? 0), 0);
+    const maxPosible   = elementosPuntaje.reduce((s, e) => s + (e.total || 0) * 3, 0);
+    const madurezGlobal = maxPosible > 0
+      ? Math.round((totalPuntos / maxPosible) * 100)
+      : Math.round(elementosPuntaje.reduce((a, e) => a + e.puntaje, 0) / Math.max(1, elementosPuntaje.length));
     const nivelMadurez =
       madurezGlobal >= 80 ? 'Optimizado'   :
       madurezGlobal >= 60 ? 'Gestionado'   :
       madurezGlobal >= 40 ? 'Definido'     :
-      madurezGlobal >= 20 ? 'En Desarrollo':
-                            'Inicial';
+      madurezGlobal >= 20 ? 'En Desarrollo' : 'Inicial';
 
     res.json({
       diagnostico_id:  diag?.id || null,
@@ -3471,6 +4576,166 @@ app.get('/api/dashboard/madurez', verificarToken, async (req, res) => {
   } catch (err) {
     console.error('ERROR EN [/api/dashboard/madurez]:', err.message);
     res.status(500).json({ error: err.message });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 📈 RADAR DE MADUREZ DINÁMICO — GET /api/v1/radar/evolucion/:centroId
+// centroId = planta_id. Base = último diagnóstico; actual = base + mejoras (completadas).
+// ═══════════════════════════════════════════════════════════════════════════════
+const ELEMENTOS_PSM_CCPS_20 = [
+  'Auditorías', 'Cultura de Seguridad', 'Integridad Mecánica', 'Gestión del Cambio',
+  'Participación del Trabajador', 'Conocimiento del Proceso', 'Procedimientos Operativos',
+  'Prácticas de Trabajo Seguro', 'Análisis de Riesgos', 'Gestión de Contratistas',
+  'Capacitación y Competencia', 'Preparación para Emergencias', 'Investigación de Incidentes',
+  'Cumplimiento de Normas', 'Métricas e Indicadores', 'Revisión por la Dirección',
+  'Alcance de las Partes Interesadas', 'Preparación Operativa', 'Conducción de Operaciones',
+  'Mejora Continua',
+];
+
+function mapElementoToPsmId(elemento) {
+  if (!elemento) return null;
+  const e = String(elemento).trim();
+  const i = ELEMENTOS_PSM_CCPS_20.findIndex(n => n.toLowerCase() === e.toLowerCase());
+  return i >= 0 ? i + 1 : null;
+}
+
+app.get('/api/v1/radar/evolucion/:centroId', verificarToken, async (req, res) => {
+  const centroId = parseInt(req.params.centroId);
+  const diagnosticoIdHistorico = req.query.diagnostico_id_historico ? parseInt(req.query.diagnostico_id_historico) : null;
+  if (!centroId || isNaN(centroId)) {
+    return res.status(400).json({ error: 'centroId (planta_id) inválido' });
+  }
+  try {
+    const tid = tenantScope(req);
+
+    // 1) Último diagnóstico del centro (planta_id) como base
+    let diagQuery = `
+      SELECT d.id, d.planta_id, d.tenant_id, d.estado, d.nivel_calculado
+      FROM diagnosticos d
+      WHERE d.planta_id = $1
+      ${tid ? 'AND d.tenant_id = $2' : ''}
+      ORDER BY d.updated_at DESC NULLS LAST, d.created_at DESC
+      LIMIT 1
+    `;
+    const diagParams = tid ? [centroId, tid] : [centroId];
+    const { rows: [diagBase] } = await pool.query(diagQuery, diagParams);
+
+    const diagnosticoIdBase = diagBase?.id || null;
+
+    // 2) Puntaje base por elemento: desde validaciones HITL o respuestas del último diagnóstico
+    const basePorElementoId = Array.from({ length: 20 }, (_, i) => ({ id: i + 1, nombre: ELEMENTOS_PSM_CCPS_20[i], value: 0 }));
+
+    if (diagBase) {
+      const { rows: hitl } = await pool.query(`
+        SELECT p.elemento,
+               COUNT(*) AS total,
+               SUM(CASE WHEN COALESCE(vh.calificacion_humano, vh.calificacion_ia) = 'Suficiente'    THEN 3
+                        WHEN COALESCE(vh.calificacion_humano, vh.calificacion_ia) = 'Escasa'         THEN 2
+                        WHEN COALESCE(vh.calificacion_humano, vh.calificacion_ia) = 'Al menos una'   THEN 1
+                        ELSE 0 END) AS puntos
+        FROM preguntas p
+        LEFT JOIN diagnostico_validaciones_hitl vh ON vh.pregunta_id = p.id AND vh.diagnostico_id = $1
+        WHERE p.elemento IS NOT NULL AND p.elemento != ''
+        GROUP BY p.elemento
+      `, [diagBase.id]);
+
+      for (const r of hitl) {
+        const psmId = mapElementoToPsmId(r.elemento);
+        if (psmId && r.total > 0) {
+          const idx = psmId - 1;
+          basePorElementoId[idx].value = Math.min(100, Math.round((r.puntos / (r.total * 3)) * 100));
+        }
+      }
+      if (hitl.length === 0) {
+        const { rows: resp } = await pool.query(`
+          SELECT p.elemento,
+                 COUNT(*) AS total,
+                 SUM(CASE WHEN dr.respuesta = 'Suficiente'  THEN 3
+                          WHEN dr.respuesta = 'Escasa'     THEN 2
+                          WHEN dr.respuesta = 'Al menos una' THEN 1 ELSE 0 END) AS puntos
+          FROM preguntas p
+          LEFT JOIN diagnostico_respuestas dr ON dr.pregunta_id = p.id AND dr.diagnostico_id = $1
+          WHERE p.elemento IS NOT NULL AND p.elemento != ''
+          GROUP BY p.elemento
+        `, [diagBase.id]);
+        for (const r of resp) {
+          const psmId = mapElementoToPsmId(r.elemento);
+          if (psmId && r.total > 0) {
+            const idx = psmId - 1;
+            basePorElementoId[idx].value = Math.min(100, Math.round((r.puntos / (r.total * 3)) * 100));
+          }
+        }
+      }
+    }
+
+    // 3) Mejoras: solo tareas con estado_aprobacion = 'CERRADA' (Maker-Checker)
+    const { rows: mejoras } = await pool.query(`
+      SELECT pa.elemento_psm_id, COALESCE(SUM(pa.impacto_puntaje), 0) AS suma
+      FROM plan_accion_items pa
+      JOIN diagnosticos d ON d.id = pa.diagnostico_id AND d.planta_id = $1
+      WHERE pa.estado_aprobacion = 'CERRADA'
+      ${tid ? 'AND pa.tenant_id = $2' : ''}
+      GROUP BY pa.elemento_psm_id
+    `, tid ? [centroId, tid] : [centroId]);
+
+    const mejorasPorId = {};
+    for (const m of mejoras) {
+      const id = m.elemento_psm_id != null ? parseInt(m.elemento_psm_id) : null;
+      if (id >= 1 && id <= 20) mejorasPorId[id] = parseFloat(m.suma) || 0;
+    }
+
+    // 4) Series: inicial (base), actual (base + mejoras, cap 100), meta (100)
+    const inicial = basePorElementoId.map(e => Math.round(e.value));
+    const actual  = basePorElementoId.map((e, i) => {
+      const id = i + 1;
+      const mejora = mejorasPorId[id] || 0;
+      return Math.min(100, Math.round(e.value + mejora));
+    });
+    const meta = Array(20).fill(100);
+
+    const indiceGlobalInicial = inicial.length ? Math.round(inicial.reduce((a, b) => a + b, 0) / inicial.length) : 0;
+    const indiceGlobalActual  = actual.length  ? Math.round(actual.reduce((a, b) => a + b, 0) / actual.length)  : 0;
+
+    const series = { inicial, actual, meta };
+    if (diagnosticoIdHistorico && diagnosticoIdHistorico !== diagnosticoIdBase) {
+      const { rows: [diagHist] } = await pool.query(
+        'SELECT id FROM diagnosticos WHERE id = $1 AND planta_id = $2',
+        [diagnosticoIdHistorico, centroId]
+      );
+      if (diagHist) {
+        const histPorElementoId = Array.from({ length: 20 }, () => 0);
+        const { rows: hitlHist } = await pool.query(`
+          SELECT p.elemento, COUNT(*) AS total,
+                 SUM(CASE WHEN COALESCE(vh.calificacion_humano, vh.calificacion_ia) = 'Suficiente' THEN 3
+                          WHEN COALESCE(vh.calificacion_humano, vh.calificacion_ia) = 'Escasa' THEN 2
+                          WHEN COALESCE(vh.calificacion_humano, vh.calificacion_ia) = 'Al menos una' THEN 1 ELSE 0 END) AS puntos
+          FROM preguntas p
+          LEFT JOIN diagnostico_validaciones_hitl vh ON vh.pregunta_id = p.id AND vh.diagnostico_id = $1
+          WHERE p.elemento IS NOT NULL AND p.elemento != ''
+          GROUP BY p.elemento
+        `, [diagnosticoIdHistorico]);
+        for (const r of hitlHist) {
+          const psmId = mapElementoToPsmId(r.elemento);
+          if (psmId && r.total > 0) {
+            histPorElementoId[psmId - 1] = Math.min(100, Math.round((r.puntos / (r.total * 3)) * 100));
+          }
+        }
+        series.historico = histPorElementoId;
+      }
+    }
+    res.json({
+      centro_id: centroId,
+      diagnostico_id_base: diagnosticoIdBase,
+      diagnostico_id_historico: diagnosticoIdHistorico && series.historico ? diagnosticoIdHistorico : undefined,
+      indice_madurez_global_inicial: indiceGlobalInicial,
+      indice_madurez_global_actual: indiceGlobalActual,
+      series,
+      elementos: basePorElementoId.map(e => ({ id: e.id, nombre: e.nombre })),
+    });
+  } catch (err) {
+    console.error('[RADAR] /api/v1/radar/evolucion error:', err.message);
+    res.status(500).json({ error: err.message || 'Error al calcular evolución del radar' });
   }
 });
 
@@ -3591,9 +4856,8 @@ app.post('/api/pronostico/generar', verificarToken, async (req, res) => {
       LIMIT 1
     `, tid ? [tid] : []);
 
-    if (acciones.length === 0) {
-      return res.status(400).json({ error: 'No hay acciones pendientes en el Plan de Acción para generar un pronóstico.' });
-    }
+    // Si no hay acciones pendientes, se genera igual un pronóstico basado solo en el último diagnóstico (riesgo residual).
+    const hayAccionesPendientes = acciones.length > 0;
 
     // ── 3. Preparar contexto para la IA ──────────────────────────────────
     const hoy       = new Date();
@@ -3602,13 +4866,13 @@ app.post('/api/pronostico/generar', verificarToken, async (req, res) => {
     const nivelDiag = ultimoDiag?.nivel_calculado || 'No determinado';
 
     const accionesPorCriticidad = {
-      Crítico: acciones.filter(a => a.criticidad === 'Crítico'),
-      Alto:    acciones.filter(a => a.criticidad === 'Alto'),
-      Medio:   acciones.filter(a => a.criticidad === 'Medio'),
-      Bajo:    acciones.filter(a => a.criticidad === 'Bajo'),
+      Crítico: (acciones || []).filter(a => a.criticidad === 'Crítico'),
+      Alto:    (acciones || []).filter(a => a.criticidad === 'Alto'),
+      Medio:   (acciones || []).filter(a => a.criticidad === 'Medio'),
+      Bajo:    (acciones || []).filter(a => a.criticidad === 'Bajo'),
     };
 
-    const formatAcciones = (arr) => arr.map(a => {
+    const formatAcciones = (arr) => (arr || []).map(a => {
       const diasRestantes = a.fecha_limite
         ? Math.ceil((new Date(a.fecha_limite) - hoy) / 86400000)
         : null;
@@ -3621,7 +4885,8 @@ app.post('/api/pronostico/generar', verificarToken, async (req, res) => {
         Estado: ${a.estado}`;
     }).join('\n\n');
 
-    const contextoAcciones = `
+    const contextoAcciones = hayAccionesPendientes
+      ? `
 ACCIONES CRÍTICAS (${accionesPorCriticidad.Crítico.length}):
 ${formatAcciones(accionesPorCriticidad.Crítico) || 'Ninguna'}
 
@@ -3632,7 +4897,8 @@ ACCIONES MEDIAS (${accionesPorCriticidad.Medio.length}):
 ${formatAcciones(accionesPorCriticidad.Medio) || 'Ninguna'}
 
 ACCIONES BAJAS (${accionesPorCriticidad.Bajo.length}):
-${formatAcciones(accionesPorCriticidad.Bajo) || 'Ninguna'}`;
+${formatAcciones(accionesPorCriticidad.Bajo) || 'Ninguna'}`
+      : '\nNo hay acciones pendientes en el Plan de Acción (todas completadas o canceladas). Evalúa el riesgo residual y la madurez actual según el último diagnóstico.';
 
     const contextoIA = ultimoDiag?.analisis_final_ia
       ? `\nHallazgos del último diagnóstico (nivel ${nivelDiag}):\n${

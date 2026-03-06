@@ -656,7 +656,7 @@ export default function RecorridoView({ diagnosticoId, faseActual = 4, onNavegar
                 onNavegar={onNavegar}
                 soloLectura={soloLectura}
                 diagnosticoId={diagnosticoId}
-                refreshKey={notas?.length}
+                refreshKey={`${notas?.length ?? 0}-${notas?.filter(n => n.analisis_ia).length ?? 0}`}
               />
             </div>
           )}

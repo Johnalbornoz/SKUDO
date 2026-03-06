@@ -1143,7 +1143,7 @@ export default function EntrevistasView({ diagnosticoId, faseActual = 5, onNaveg
                   onNavegar={onNavegar}
                   soloLectura={soloLectura}
                   diagnosticoId={diagnosticoId}
-                  refreshKey={entrevistas?.length}
+                  refreshKey={`${entrevistas?.length ?? 0}-${analizadas}`}
                 />
               </div>
             )}

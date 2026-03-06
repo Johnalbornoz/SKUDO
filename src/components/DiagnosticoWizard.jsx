@@ -166,6 +166,9 @@ export default function DiagnosticoWizard({ onCerrar, onSiguiente }) {
   const progreso     = Object.values(valores).filter((v) => v > 0).length;
   const todoCompleto = progreso === 6;
   const conJustif    = Object.values(comentarios).filter(Boolean).length;
+  const faltaPlanta  = plantas.length > 0 && !plantaId;
+  const faltaArea    = plantas.length > 0 && plantaId && areas.length > 0 && !areaId;
+  const puedeCalcular = todoCompleto && !faltaPlanta && !faltaArea;
 
   function seleccionar(key, valor) {
     const nuevos = { ...valores, [key]: valor };
@@ -203,6 +206,14 @@ export default function DiagnosticoWizard({ onCerrar, onSiguiente }) {
   async function handleCalcular() {
     if (!todoCompleto) {
       setError('Selecciona un valor en cada dimensión para continuar.');
+      return;
+    }
+    if (plantas.length > 0 && !plantaId) {
+      setError('Debes seleccionar la Planta / Sede para continuar.');
+      return;
+    }
+    if (plantas.length > 0 && plantaId && areas.length > 0 && !areaId) {
+      setError('Debes seleccionar el Área para continuar.');
       return;
     }
     setCalculando(true);
@@ -259,24 +270,40 @@ export default function DiagnosticoWizard({ onCerrar, onSiguiente }) {
 
           {fase === 'form' ? (
             <>
-              {/* Selectores de ubicación */}
+              {/* Selectores de ubicación: empresa y sede obligatorios */}
               {plantas.length > 0 && (
-                <div className="grid grid-cols-2 gap-3 mb-5 p-4 bg-gray-50 rounded-xl border border-gray-100">
-                  <div>
-                    <label className="block text-xs font-semibold text-gray-500 mb-1 uppercase tracking-wide">Planta (opcional)</label>
-                    <select value={plantaId} onChange={(e) => setPlantaId(e.target.value)}
-                      className="w-full px-3 py-2 rounded-lg border border-gray-200 text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-green-500 bg-white">
-                      <option value="">— Seleccionar —</option>
-                      {plantas.map((p) => <option key={p.id} value={p.id}>{p.nombre}</option>)}
-                    </select>
-                  </div>
-                  <div>
-                    <label className="block text-xs font-semibold text-gray-500 mb-1 uppercase tracking-wide">Área (opcional)</label>
-                    <select value={areaId} onChange={(e) => setAreaId(e.target.value)} disabled={!plantaId}
-                      className="w-full px-3 py-2 rounded-lg border border-gray-200 text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-green-500 bg-white disabled:opacity-50">
-                      <option value="">— Seleccionar —</option>
-                      {areas.map((a) => <option key={a.id} value={a.id}>{a.nombre}</option>)}
-                    </select>
+                <div className="mb-5 p-4 bg-gray-50 rounded-xl border border-gray-100">
+                  <p className="text-xs text-amber-700 mb-3 font-medium">
+                    <strong>Empresa y sede</strong> son obligatorios. Selecciona la planta y el área antes de continuar.
+                  </p>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs font-semibold text-gray-600 mb-1 uppercase tracking-wide">
+                        Planta / Sede <span className="text-red-500">*</span>
+                      </label>
+                      <select
+                        value={plantaId}
+                        onChange={(e) => setPlantaId(e.target.value)}
+                        className={`w-full px-3 py-2 rounded-lg border text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-green-500 bg-white ${!plantaId ? 'border-amber-300 bg-amber-50/50' : 'border-gray-200'}`}
+                      >
+                        <option value="">— Selecciona planta —</option>
+                        {plantas.map((p) => <option key={p.id} value={p.id}>{p.nombre}</option>)}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-xs font-semibold text-gray-600 mb-1 uppercase tracking-wide">
+                        Área {areas.length > 0 ? <span className="text-red-500">*</span> : null}
+                      </label>
+                      <select
+                        value={areaId}
+                        onChange={(e) => setAreaId(e.target.value)}
+                        disabled={!plantaId}
+                        className={`w-full px-3 py-2 rounded-lg border text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-green-500 bg-white disabled:opacity-50 ${plantaId && !areaId && areas.length > 0 ? 'border-amber-300 bg-amber-50/50' : 'border-gray-200'}`}
+                      >
+                        <option value="">— {areas.length > 0 ? 'Selecciona área' : 'Sin áreas'} —</option>
+                        {areas.map((a) => <option key={a.id} value={a.id}>{a.nombre}</option>)}
+                      </select>
+                    </div>
                   </div>
                 </div>
               )}
@@ -456,8 +483,17 @@ export default function DiagnosticoWizard({ onCerrar, onSiguiente }) {
                   {6 - progreso} dimensión{6 - progreso !== 1 ? 'es' : ''} pendiente{6 - progreso !== 1 ? 's' : ''}
                 </span>
               )}
-              <button type="button" onClick={handleCalcular} disabled={!todoCompleto || calculando}
-                className="flex items-center gap-2 px-5 py-2.5 rounded-lg text-sm font-semibold text-white bg-green-600 hover:bg-green-700 transition-colors shadow-sm disabled:opacity-50 disabled:cursor-not-allowed">
+              {(faltaPlanta || faltaArea) && (
+                <span className="text-xs text-amber-600 font-medium">
+                  {faltaPlanta ? 'Selecciona planta / sede' : 'Selecciona área'}
+                </span>
+              )}
+              <button
+                type="button"
+                onClick={handleCalcular}
+                disabled={!puedeCalcular || calculando}
+                className="flex items-center gap-2 px-5 py-2.5 rounded-lg text-sm font-semibold text-white bg-green-600 hover:bg-green-700 transition-colors shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
+              >
                 {calculando ? 'Calculando...' : 'Calcular Nivel'}
                 {!calculando && <ChevronRight className="w-4 h-4" />}
               </button>

@@ -4,19 +4,32 @@ import { useAuth } from '../contexts/AuthContext';
 
 // ─── Constantes ───────────────────────────────────────────────────────────────
 
-const ROLES_SUPER  = ['SuperAdmin', 'Consultor', 'AdminInquilino', 'Auditor', 'Lector'];
-const ROLES_ADMIN  = ['AdminInquilino', 'Auditor', 'Lector'];
+// Roles oficiales Skudo: valor técnico -> etiqueta visual (dropdown y tabla)
+const ROLES_SISTEMA = [
+  { value: 'admin_cliente',    label: 'Administrador Cliente' },
+  { value: 'operativo_n1',     label: 'Responsable Operativo (Nivel 1)' },
+  { value: 'verificador_n2',   label: 'Verificador / Aprobador (Nivel 2)' },
+  { value: 'consultor_skudo',  label: 'Consultor Skudo' },
+  { value: 'ejecutivo_lectura', label: 'Vista Ejecutiva (Solo Lectura)' },
+];
 
 const ROL_BADGE = {
-  SuperAdmin:     'bg-purple-100 text-purple-700',
-  Consultor:      'bg-blue-100 text-blue-700',
-  AdminInquilino: 'bg-green-100 text-green-700',
-  Auditor:        'bg-amber-100 text-amber-700',
-  Lector:         'bg-gray-100 text-gray-600',
+  admin_cliente:     'bg-purple-100 text-purple-700',
+  operativo_n1:      'bg-blue-100 text-blue-700',
+  verificador_n2:    'bg-green-100 text-green-700',
+  consultor_skudo:   'bg-amber-100 text-amber-700',
+  ejecutivo_lectura: 'bg-gray-100 text-gray-600',
 };
 
+/** Formatea el valor técnico del rol al texto amigable para mostrar en tabla/badge. */
+function getRolLabel(rol) {
+  if (!rol) return '—';
+  const opt = ROLES_SISTEMA.find((r) => r.value === rol);
+  return opt ? opt.label : rol;
+}
+
 const USUARIO_VACIO = {
-  nombre: '', email: '', password: '', rol: 'Lector', tenant_id: '', activo: true,
+  nombre: '', email: '', password: '', rol: 'ejecutivo_lectura', tenant_id: '', activo: true,
 };
 
 // ─── Componente ───────────────────────────────────────────────────────────────
@@ -24,7 +37,7 @@ const USUARIO_VACIO = {
 export default function UsuariosAdmin() {
   const { usuario: yo } = useAuth();
   const esSuperAdmin = yo?.rol === 'SuperAdmin';
-  const rolesDisponibles = esSuperAdmin ? ROLES_SUPER : ROLES_ADMIN;
+  const rolesDisponibles = ROLES_SISTEMA;
 
   const [usuarios,   setUsuarios]   = useState([]);
   const [tenants,    setTenants]    = useState([]);
@@ -87,6 +100,10 @@ export default function UsuariosAdmin() {
   async function guardar() {
     if (!form.nombre.trim() || !form.email.trim()) {
       setError('Nombre y email son obligatorios.');
+      return;
+    }
+    if (!form.rol || !ROLES_SISTEMA.some((r) => r.value === form.rol)) {
+      setError('Debe seleccionar un rol válido.');
       return;
     }
     if (!editando && !form.password.trim()) {
@@ -200,7 +217,7 @@ export default function UsuariosAdmin() {
                     <td className="px-4 py-3 text-gray-500">{u.email}</td>
                     <td className="px-4 py-3">
                       <span className={`px-2 py-0.5 rounded-full text-xs font-semibold ${ROL_BADGE[u.rol] ?? 'bg-gray-100 text-gray-600'}`}>
-                        {u.rol}
+                        {getRolLabel(u.rol)}
                       </span>
                     </td>
                     {esSuperAdmin && (
@@ -292,13 +309,20 @@ export default function UsuariosAdmin() {
               </div>
               {/* Rol */}
               <div>
-                <label className="block text-xs font-semibold text-gray-500 mb-1 uppercase tracking-wide">Rol *</label>
+                <label className="block text-xs font-semibold text-gray-500 mb-1 uppercase tracking-wide">Rol del usuario *</label>
                 <select
                   value={form.rol}
                   onChange={(e) => setForm({ ...form, rol: e.target.value })}
+                  required
                   className="w-full px-3 py-2 rounded-lg border border-gray-200 text-sm text-gray-800 focus:outline-none focus:ring-2 focus:ring-green-500 bg-white"
                 >
-                  {rolesDisponibles.map((r) => <option key={r} value={r}>{r}</option>)}
+                  <option value="">— Seleccione un rol —</option>
+                  {form.rol && !ROLES_SISTEMA.some((r) => r.value === form.rol) && (
+                    <option value={form.rol}>{form.rol} (actual — migrar a uno de abajo)</option>
+                  )}
+                  {rolesDisponibles.map((r) => (
+                    <option key={r.value} value={r.value}>{r.label}</option>
+                  ))}
                 </select>
               </div>
               {/* Empresa (solo SuperAdmin) */}

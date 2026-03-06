@@ -56,7 +56,10 @@ async function migrate() {
         password_hash TEXT NOT NULL,
         nombre        TEXT NOT NULL,
         rol           TEXT NOT NULL
-                      CHECK (rol IN ('SuperAdmin','Consultor','AdminInquilino','Auditor','Lector')),
+                      CHECK (rol IN (
+                        'SuperAdmin','Consultor','AdminInquilino','Auditor','Lector',
+                        'admin_cliente','operativo_n1','verificador_n2','consultor_skudo','ejecutivo_lectura'
+                      )),
         tenant_id     INTEGER REFERENCES tenants(id) ON DELETE SET NULL,
         activo        BOOLEAN DEFAULT TRUE,
         created_at    TIMESTAMP DEFAULT NOW()

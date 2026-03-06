@@ -1,4 +1,4 @@
-// Full-Bridge: en dev usamos proxy Vite (/api → localhost:3001) para evitar CORS y "Failed to fetch"
+// Full-Bridge: en dev usamos proxy Vite (/api → localhost:3002) para evitar CORS y "Failed to fetch"
 const API_URL = (import.meta.env.PROD
   ? 'https://skudo.onrender.com/api'
   : '/api').replace(/\/$/, '');
@@ -31,6 +31,10 @@ async function http(url, options = {}) {
       headers: { ...authHeaders(), ...options.headers },
     });
   } catch (err) {
+    const msg = err?.message || '';
+    if (/failed to fetch|networkerror|load failed|econnrefused/i.test(msg)) {
+      throw new Error('No se pudo conectar al servidor. Comprueba que la API esté en marcha (node server.js en el puerto 3002).');
+    }
     throw err;
   }
   if (res.status === 401) {
@@ -74,9 +78,14 @@ async function httpLong(url, options = {}, timeoutMs = TIMEOUT_IA_MS) {
     return res.json();
   } catch (err) {
     clearTimeout(to);
-    const isTimeout = err.name === 'AbortError' || /timeout|abort|failed to fetch/i.test(err.message || '');
+    const msg = err?.message || '';
+    const isTimeout = err.name === 'AbortError' || /timeout|abort/i.test(msg);
+    const isNetwork = /failed to fetch|networkerror|load failed|econnrefused/i.test(msg);
     if (isTimeout) {
-      throw new Error('El servidor está procesando la triangulación, por favor espera un momento e intenta de nuevo.');
+      throw new Error('El servidor está procesando la solicitud (puede tardar 1–2 min). Espera e intenta de nuevo.');
+    }
+    if (isNetwork) {
+      throw new Error('No se pudo conectar al servidor. Comprueba que la API esté en marcha (ej. node server.js en el puerto 3002).');
     }
     throw err;
   }
@@ -203,6 +212,16 @@ const apiService = {
     return http(`${API_URL}/diagnosticos/${id}`);
   },
 
+  /** Indica si el diagnóstico tiene alcance confirmado (snapshot de preguntas). */
+  async fetchAlcanceConfirmado(diagnosticoId) {
+    return http(`${API_URL}/diagnosticos/${diagnosticoId}/alcance-confirmado`);
+  },
+
+  /** Fase 1: congela el alcance de preguntas (snapshot). Debe llamarse cuando el consultor da OK. */
+  async confirmarAlcance(diagnosticoId) {
+    return http(`${API_URL}/diagnosticos/${diagnosticoId}/confirmar-alcance`, { method: 'POST' });
+  },
+
   async createDiagnostico(data) {
     return http(`${API_URL}/diagnosticos`, { method: 'POST', body: JSON.stringify(data) });
   },
@@ -245,8 +264,9 @@ const apiService = {
     return http(`${API_URL}/diagnosticos/${diagId}/triangular`, { method: 'POST' });
   },
 
-  async fetchDocumentos(diagId) {
-    return http(`${API_URL}/diagnosticos/${diagId}/documentos`);
+  async fetchDocumentos(diagId, categoria = null) {
+    const qs = categoria ? `?categoria=${encodeURIComponent(categoria)}` : '';
+    return http(`${API_URL}/diagnosticos/${diagId}/documentos${qs}`);
   },
 
   async analizarDocumento(diagId, docId) {
@@ -263,6 +283,14 @@ const apiService = {
 
   async deleteDiagnostico(id) {
     return http(`${API_URL}/diagnosticos/${id}`, { method: 'DELETE' });
+  },
+
+  async previewLimpiarDiagnosticosFinalizados() {
+    return http(`${API_URL}/admin/limpiar-diagnosticos-finalizados/preview`);
+  },
+
+  async limpiarDiagnosticosFinalizados() {
+    return http(`${API_URL}/admin/limpiar-diagnosticos-finalizados`, { method: 'POST' });
   },
 
   async fetchPreguntasDiagnostico(diagId) {
@@ -339,14 +367,15 @@ const apiService = {
   // 🔍 FASE 5: AUDITORÍA EXPERTA CON TRIANGULACIÓN DE EVIDENCIAS
   // ═══════════════════════════════════════════════════════════════════════════════
 
-  // Obtener preguntas filtradas por complejidad para Fase 5
-  async fetchPreguntasFase5(diagnosticoId, complexity = null) {
-    const url = complexity 
+  // Obtener preguntas filtradas por complejidad para Fase 5. cacheBust evita respuestas en caché tras validar todas.
+  async fetchPreguntasFase5(diagnosticoId, complexity = null, cacheBust = false) {
+    let url = complexity
       ? `${API_URL}/diagnosticos/${diagnosticoId}/questions?complexity=${complexity}`
       : `${API_URL}/diagnosticos/${diagnosticoId}/questions`;
-      
+    if (cacheBust) url += (url.includes('?') ? '&' : '?') + '_t=' + Date.now();
     const response = await fetch(url, {
       headers: authHeaders(),
+      cache: cacheBust ? 'no-store' : 'default',
     });
     if (!response.ok) throw new Error(await response.text());
     return response.json();
@@ -358,6 +387,11 @@ const apiService = {
       method: 'POST',
       body: JSON.stringify(validacionData),
     });
+  },
+
+  /** (Temporal) Aceptar todas las sugerencias IA como validadas en Fase 6 */
+  async validarTodasSugerenciasIA(diagnosticoId) {
+    return http(`${API_URL}/diagnosticos/${diagnosticoId}/validar-todas-ia`, { method: 'POST' });
   },
 
   // Obtener detalle de evidencia específica
@@ -380,6 +414,10 @@ const apiService = {
   },
 
   // ── Plan de Acción ────────────────────────────────────────────────────────
+
+  async fetchElementosPsm() {
+    return http(`${API_URL}/elementos-psm`);
+  },
 
   async fetchPlanAccion({ criticidad, estado, diagnostico_id } = {}) {
     const p = new URLSearchParams();
@@ -436,6 +474,11 @@ const apiService = {
   async fetchMadurezDashboard(plantaId = null) {
     const qs = plantaId ? `?planta_id=${plantaId}` : '';
     return http(`${API_URL}/dashboard/madurez${qs}`);
+  },
+
+  /** Radar de madurez para un diagnóstico concreto (base + impacto por acciones completadas). */
+  async fetchRadarDiagnostico(diagnosticoId) {
+    return http(`${API_URL}/diagnosticos/${diagnosticoId}/radar`);
   },
 
   async fetchDashboardStats() {

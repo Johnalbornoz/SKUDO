@@ -47,9 +47,11 @@ export default function AuditoriaExpertaView({
   const [validando, setValidando]               = useState(false);
   const [progreso, setProgreso]                 = useState({ validadas: 0, total: 0 });
   const [filtroCalificacion, setFiltroCalificacion] = useState('');
+  const [filtroElemento, setFiltroElemento] = useState('');
   const [nivelComplejidad, setNivelComplejidad] = useState('');
   const [descargando, setDescargando]           = useState(false);
   const [finalizando, setFinalizando]           = useState(false);
+  const [validandoTodas, setValidandoTodas]    = useState(false);
 
   useEffect(() => {
     if (diagnosticoId) cargarPreguntas();
@@ -106,6 +108,36 @@ export default function AuditoriaExpertaView({
     }
   }
 
+  async function handleAceptarTodasSugerenciasIA() {
+    if (!window.confirm('¿Aceptar todas las Sugerencias IA como validadas? Se marcará cada pregunta con la calificación sugerida por la IA.')) return;
+    setValidandoTodas(true);
+    try {
+      const data = await apiService.validarTodasSugerenciasIA(diagnosticoId);
+      const totalValidadas = data.validadas ?? preguntas.length;
+      // Actualización optimista: marcar todas como validadas con la sugerencia IA para que el contador y la tabla se actualicen al instante
+      const ahora = new Date().toISOString();
+      setPreguntas(prev => prev.map(p => ({
+        ...p,
+        calificacion_humano: p.sugerencia_ia || p.calificacion_ia || 'No hay evidencia',
+        criterio_profesional: p.criterio_profesional || 'Aceptada sugerencia IA (validación automática)',
+        validado_en: ahora,
+      })));
+      alert(`Se aceptaron ${totalValidadas} preguntas según la sugerencia IA.`);
+      // Recargar desde el servidor (con cache-bust) para confirmar y tener datos consistentes
+      setLoading(true);
+      try {
+        const data = await apiService.fetchPreguntasFase5(diagnosticoId, null, true);
+        setPreguntas(data.preguntas || []);
+      } finally {
+        setLoading(false);
+      }
+    } catch (err) {
+      alert(`Error: ${err.message}`);
+    } finally {
+      setValidandoTodas(false);
+    }
+  }
+
   async function handleFinalizar() {
     if (!window.confirm('¿Finalizar el diagnóstico? Se generará el análisis IA y el diagnóstico quedará cerrado.')) return;
     setFinalizando(true);
@@ -148,10 +180,12 @@ export default function AuditoriaExpertaView({
     });
   }
 
-  const preguntasFiltradas = preguntas.filter(p =>
-    !filtroCalificacion ||
-    (p.calificacion_humano || p.sugerencia_ia) === filtroCalificacion
-  );
+  const elementosUnicos = [...new Set(preguntas.map(p => (p.elemento || '').trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+  const preguntasFiltradas = preguntas.filter(p => {
+    if (filtroCalificacion && (p.calificacion_humano || p.sugerencia_ia) !== filtroCalificacion) return false;
+    if (filtroElemento && (p.elemento || '').trim() !== filtroElemento) return false;
+    return true;
+  });
 
   // ── Estado de carga ──────────────────────────────────────────────────────────
   if (loading) {
@@ -253,18 +287,43 @@ export default function AuditoriaExpertaView({
 
       <div className="max-w-7xl mx-auto px-6 py-6 space-y-6">
 
-        {/* ── Navegación entre fases ─────────────────────────────────────────── */}
+        {/* ── Navegación entre fases + barra de progreso de preguntas con evidencia ─────────────────────────────────────────── */}
         <NavegacionFases
           faseActual={6}
           onNavegar={(f) => onNavegar && onNavegar(f)}
           diagnosticoId={diagnosticoId}
-          refreshKey={progreso.validadas}
+          refreshKey={`${progreso.total}-${progreso.validadas}`}
         />
+
+        {/* ── Botón temporal: Aceptar todas las sugerencias IA ───────────────── */}
+        <div className="bg-amber-50 border border-amber-200 rounded-xl px-6 py-3 flex flex-wrap items-center justify-between gap-3">
+          <p className="text-sm text-amber-800">
+            <strong>Temporal:</strong> Validar todas las preguntas aceptando la Sugerencia IA como calificación humana.
+          </p>
+          <button
+            type="button"
+            onClick={handleAceptarTodasSugerenciasIA}
+            disabled={validandoTodas || preguntas.length === 0}
+            className="flex items-center gap-2 px-4 py-2 rounded-lg bg-amber-600 hover:bg-amber-700 text-white text-sm font-semibold disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+          >
+            {validandoTodas ? (
+              <>
+                <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                Validando…
+              </>
+            ) : (
+              <>
+                <CheckCircle className="w-4 h-4" />
+                Aceptar todas las Sugerencias IA
+              </>
+            )}
+          </button>
+        </div>
 
         {/* ── Barra de filtros y leyenda ─────────────────────────────────────── */}
         <div className="bg-white rounded-xl shadow-sm border border-gray-100 px-6 py-4">
           <div className="flex flex-wrap items-center justify-between gap-4">
-            <div className="flex items-center gap-3">
+            <div className="flex flex-wrap items-center gap-3">
               <span className="text-sm font-semibold text-gray-700">Filtrar por:</span>
               <select
                 value={filtroCalificacion}
@@ -277,6 +336,26 @@ export default function AuditoriaExpertaView({
                 <option value="Al menos una">Al menos una</option>
                 <option value="No hay evidencia">Sin evidencia</option>
               </select>
+              <select
+                value={filtroElemento}
+                onChange={e => setFiltroElemento(e.target.value)}
+                className="px-3 py-1.5 border border-gray-200 rounded-lg text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-green-500 min-w-[180px]"
+                title="Filtrar por elemento PSM"
+              >
+                <option value="">Todos los elementos</option>
+                {elementosUnicos.map(el => (
+                  <option key={el} value={el}>{el}</option>
+                ))}
+              </select>
+              {(filtroCalificacion || filtroElemento) && (
+                <button
+                  type="button"
+                  onClick={() => { setFiltroCalificacion(''); setFiltroElemento(''); }}
+                  className="text-xs font-medium text-gray-500 hover:text-gray-700 underline"
+                >
+                  Limpiar filtros
+                </button>
+              )}
             </div>
 
             {/* Leyenda de tipos de evidencia */}
@@ -293,7 +372,7 @@ export default function AuditoriaExpertaView({
           <div className="text-center py-16 bg-white rounded-xl shadow-sm border border-gray-100">
             <Eye className="w-10 h-10 text-gray-300 mx-auto mb-3" />
             <p className="text-gray-500 font-medium">No hay preguntas con ese filtro</p>
-            <p className="text-gray-400 text-sm mt-1">Prueba seleccionando "Todas las calificaciones"</p>
+            <p className="text-gray-400 text-sm mt-1">Prueba con otras calificaciones o elementos, o pulsa &quot;Limpiar filtros&quot;</p>
           </div>
         ) : (
           <div className="space-y-3">
@@ -326,6 +405,13 @@ function PreguntaAccordion({ pregunta, expanded, onToggle, onValidar, onAbrirEvi
   const [criterioLocal,        setCriterioLocal]        = useState(pregunta.criterio_profesional || '');
   const [justificacionLocal,   setJustificacionLocal]   = useState(pregunta.override_justificacion || '');
   const [mostrarFormulario,    setMostrarFormulario]    = useState(false);
+
+  // Sincronizar estado local cuando la pregunta se actualiza (p. ej. tras "Aceptar todas las Sugerencias IA")
+  useEffect(() => {
+    setCalificacionLocal(pregunta.calificacion_humano || '');
+    setCriterioLocal(pregunta.criterio_profesional || '');
+    setJustificacionLocal(pregunta.override_justificacion || '');
+  }, [pregunta.calificacion_humano, pregunta.criterio_profesional, pregunta.override_justificacion]);
 
   // Si el consultor cambió la calificación respecto a la IA, el criterio es obligatorio
   const requiereJustificacion = calificacionLocal !== '' && calificacionLocal !== pregunta.sugerencia_ia;

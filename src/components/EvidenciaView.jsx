@@ -15,17 +15,12 @@ import apiService, { API_BASE_URL } from '../services/apiService';
 import NavegacionFases from './NavegacionFases';
 
 
-// ─── Configuración de categorías PSM ─────────────────────────────────────────
+// ─── Categorías documentales: General | Estándares | Plan de Emergencias ─────
 
 const CATEGORIAS_PSM = [
-  { id: 'Información General',              icon: '📋', desc: 'Licencias, RUC, pólizas, registro de instalación.' },
-  { id: 'Dirección y Organización',         icon: '🏢', desc: 'Organigrama, política HSE, compromisos de la dirección.' },
-  { id: 'Análisis de Riesgos (HAZOP/LOPA)', icon: '⚠️', desc: 'HAZOP, LOPA, What-if, registro de escenarios de riesgo.' },
-  { id: 'Documentos de Proceso (P&IDs)',    icon: '🗺️', desc: 'P&ID actualizados, layout de planta, diagramas de flujo.' },
-  { id: 'Desempeño y KPIs',                 icon: '📊', desc: 'Indicadores de seguridad, registro de incidentes, auditorías.' },
-  { id: 'Normativos y Regulatorios',        icon: '⚖️', desc: 'Decreto 1347/2021, Res. 5492/2024, permisos ambientales.' },
-  { id: 'Procedimientos Operacionales',     icon: '📖', desc: 'SOP críticos, permisos de trabajo, LOTO.' },
-  { id: 'Registros de Mantenimiento',       icon: '🔧', desc: 'Plan de mantenimiento, historial de equipos críticos, órdenes.' },
+  { id: 'General',               icon: '📋', desc: 'Documentación general del diagnóstico (licencias, registros, información de contexto).' },
+  { id: 'Estándares',            icon: '📐', desc: 'Normas, estándares PSM, procedimientos y criterios técnicos.' },
+  { id: 'Plan de Emergencias',   icon: '🚨', desc: 'Planes de emergencia, procedimientos de respuesta y evacuación.' },
 ];
 
 // ─── Estado / badge helpers ───────────────────────────────────────────────────

@@ -6,6 +6,8 @@ import { useAuth } from './contexts/AuthContext';
 import LoginScreen from './components/LoginScreen';
 import PlantasAdmin from './components/PlantasAdmin';
 import ConsultorDashboard from './components/ConsultorDashboard';
+import DashboardEstrategico from './components/DashboardEstrategico';
+import Home from './components/Home';
 import UsuariosAdmin from './components/UsuariosAdmin';
 import DiagnosticoWizard from './components/DiagnosticoWizard';
 import DiagnosticosDashboard from './components/DiagnosticosDashboard';
@@ -20,6 +22,7 @@ import EntrevistasView from './components/EntrevistasView';
 import AuditoriaExpertaView from './components/AuditoriaExpertaView';
 import NavegacionFases from './components/NavegacionFases';
 import {
+  Home as HomeIcon,
   LayoutDashboard,
   Stethoscope,
   ListChecks,
@@ -33,7 +36,8 @@ import {
 } from 'lucide-react';
 
 const NAV_ITEMS = [
-  { id: 'dashboard', label: 'Dashboard' },
+  { id: 'inicio', label: 'Inicio' },
+  { id: 'radar-madurez', label: 'Radar de Madurez' },
   { id: 'diagnostico', label: 'Diagnóstico' },
   { id: 'plan', label: 'Plan de Acción' },
   { id: 'pronostico', label: 'Pronóstico' },
@@ -107,7 +111,8 @@ function Card({ title, description, icon: Icon, iconBg, iconColor, onClick }) {
 }
 
 const SIDEBAR_ICONS = {
-  Dashboard: LayoutDashboard,
+  Inicio: HomeIcon,
+  'Radar de Madurez': LayoutDashboard,
   Diagnóstico: Stethoscope,
   'Plan de Acción': ListChecks,
   Pronóstico: TrendingUp,
@@ -649,7 +654,7 @@ function EmpresasAdmin() {
 export default function App() {
   const { isAuthenticated, usuario, logout } = useAuth();
 
-  const [activeNav, setActiveNav] = useState('Dashboard');
+  const [activeNav, setActiveNav] = useState('Inicio');
   const [activeAdminTab, setActiveAdminTab] = useState('infraestructura');
   const [sidebarOpen, setSidebarOpen] = useState(false);
   // Router de páginas: view = null (dashboard/nav normal) | 'wizard' | 'cuestionario' | 'documentos' | 'recorrido' | 'entrevistas' | 'validacion'
@@ -908,16 +913,21 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-50 to-slate-100 text-gray-800 antialiased">
-      {/* Mobile: Top Bar con menú hamburguesa */}
+      {/* Mobile: Top Bar (logo → Inicio) */}
       <div className="lg:hidden bg-white border-b border-gray-200 px-4 py-3">
         <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2.5">
+          <button
+            type="button"
+            onClick={() => { setActiveNav('Inicio'); irAlDashboard(); setSidebarOpen(false); }}
+            className="flex items-center gap-2.5 rounded-xl py-1 -ml-1 active:opacity-80 focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:ring-offset-2"
+            title="Ir a Inicio"
+          >
             <img src={skudoLogo} alt="Skudo" className="w-6 h-6 shrink-0" />
             <div>
               <h1 className="text-sm font-bold text-gray-800">Skudo PSM</h1>
               <span className="text-xs text-gray-500">Expert System</span>
             </div>
-          </div>
+          </button>
           <button
             onClick={() => setSidebarOpen(!sidebarOpen)}
             className="p-2 rounded-xl bg-gray-100 hover:bg-gray-200 transition-colors"
@@ -940,9 +950,14 @@ export default function App() {
           w-72 lg:w-80 min-h-screen bg-white border-r border-gray-200 
           flex flex-col shadow-lg lg:shadow-sm transition-transform duration-300 ease-in-out
         `}>
-          {/* Desktop: Header */}
+          {/* Desktop: Header (logo → Inicio) */}
           <div className="hidden lg:flex p-6 border-b border-gray-100 bg-gradient-to-r from-emerald-50 to-teal-50">
-            <div className="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={() => { setActiveNav('Inicio'); irAlDashboard(); setSidebarOpen(false); }}
+              className="flex items-center gap-3 text-left rounded-xl hover:bg-white/60 transition-colors p-1 -m-1 focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:ring-offset-2"
+              title="Ir a Inicio"
+            >
               <div className="p-2 bg-emerald-100 rounded-xl">
                 <img src={skudoLogo} alt="Skudo" className="w-6 h-6 shrink-0" />
               </div>
@@ -950,19 +965,24 @@ export default function App() {
                 <h1 className="text-lg font-bold text-gray-800 tracking-tight">Skudo PSM</h1>
                 <span className="text-sm text-emerald-600 font-medium">Expert System</span>
               </div>
-            </div>
+            </button>
           </div>
 
-          {/* Mobile: Header */}
+          {/* Mobile: Header (logo → Inicio) */}
           <div className="lg:hidden p-4 border-b border-gray-100">
             <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2.5">
+              <button
+                type="button"
+                onClick={() => { setActiveNav('Inicio'); irAlDashboard(); setSidebarOpen(false); }}
+                className="flex items-center gap-2.5 rounded-xl hover:bg-gray-50 p-1 -m-1 transition-colors focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:ring-offset-2"
+                title="Ir a Inicio"
+              >
                 <img src={skudoLogo} alt="Skudo" className="w-6 h-6 shrink-0" />
                 <div>
                   <h1 className="text-base font-bold text-gray-800">Skudo PSM</h1>
                   <span className="text-xs text-gray-500">Expert System</span>
                 </div>
-              </div>
+              </button>
               <button
                 onClick={() => setSidebarOpen(false)}
                 className="p-2 rounded-xl text-gray-400 hover:text-gray-600 hover:bg-gray-100"
@@ -1172,7 +1192,11 @@ export default function App() {
         {/* ══════════════════════════════════════════════════════
             NAVEGACIÓN NORMAL (sidebar)  — visible solo cuando no hay fase activa
         ══════════════════════════════════════════════════════ */}
-        {currentPage.view === null && (activeNav === 'Consultor' ? (
+        {currentPage.view === null && (activeNav === 'Inicio' ? (
+          <Home onNavigate={(label) => { setActiveNav(label); irAlDashboard(); setSidebarOpen(false); }} />
+        ) : activeNav === 'Radar de Madurez' ? (
+          <DashboardEstrategico />
+        ) : activeNav === 'Consultor' ? (
           <ConsultorDashboard />
         ) : activeNav === 'Diagnóstico' ? (
           <PaginaDiagnosticos

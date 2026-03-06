@@ -23,7 +23,8 @@ import {
   FileSearch,
   MessageSquare,
   Eye,
-  ShieldCheck
+  ShieldCheck,
+  ChevronDown
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { GoogleGenAI } from "@google/genai";
@@ -34,6 +35,8 @@ import {
   DiagnosisResponse 
 } from './types';
 import { PSM_QUESTIONS } from './constants';
+import RadarMadurezPSM from './components/RadarMadurezPSM';
+import PSMRadar from './components/PSMRadar';
 
 // --- AI Service ---
 const ai = new GoogleGenAI({ apiKey: import.meta.env.VITE_GEMINI_API_KEY });
@@ -114,7 +117,65 @@ export default function App() {
   const [activeConfigTab, setActiveConfigTab] = useState<'logic' | 'questions' | 'criteria' | 'users' | 'infra'>('logic');
   const [isAdmin, setIsAdmin] = useState(true); // Mock admin status
 
-  // Cargar sesiones, config y preguntas al inicio
+  // Radar de Madurez PSM: datos por defecto (un solo conjunto estático). Se actualizan desde el diagnóstico seleccionado.
+  const RADAR_DEFAULT: { subject: string; value: number; fullMark: number }[] = [
+    { subject: 'Riesgo técnico', value: 50, fullMark: 100 },
+    { subject: 'Regulación', value: 50, fullMark: 100 },
+    { subject: 'Madurez', value: 50, fullMark: 100 },
+    { subject: 'Estrategia', value: 50, fullMark: 100 },
+    { subject: 'Complejidad', value: 50, fullMark: 100 },
+    { subject: 'Exposición', value: 50, fullMark: 100 },
+  ];
+  const [radarMadurezData, setRadarMadurezData] = useState(RADAR_DEFAULT);
+  const [radarDiagnosticoId, setRadarDiagnosticoId] = useState<number | null>(null);
+  const [radarLoading, setRadarLoading] = useState(false);
+  const [plantas, setPlantas] = useState<{ id: number; nombre: string }[]>([]);
+  const [centroIdRadar, setCentroIdRadar] = useState<number | null>(null);
+
+  // Plan de Acción (vista independiente + modal de edición)
+  const [planAccionItems, setPlanAccionItems] = useState<any[]>([]);
+  const [planAccionLoading, setPlanAccionLoading] = useState(false);
+  const [planAccionEditingItem, setPlanAccionEditingItem] = useState<any | null>(null);
+  const [elementosPsm, setElementosPsm] = useState<{ id: number; nombre: string }[]>([]);
+  const [elementosPsmLoading, setElementosPsmLoading] = useState(false);
+  const [planAccionEditForm, setPlanAccionEditForm] = useState<{
+    nombre: string; descripcion: string; responsable: string; responsable_email: string;
+    fecha_limite: string; criticidad: string; estado: string; elemento_psm_id: number | '';
+  } | null>(null);
+
+  // Modal Nueva acción de corrección (formulario controlado con dropdown Elemento PSM)
+  const [planAccionNuevaOpen, setPlanAccionNuevaOpen] = useState(false);
+  const [planAccionNuevaForm, setPlanAccionNuevaForm] = useState({
+    nombre: '',
+    descripcion: '',
+    responsable: '',
+    responsable_email: '',
+    fecha_limite: '',
+    criticidad: 'Medio' as string,
+    estado: 'Pendiente' as string,
+    elemento_psm_id: '' as number | '',
+  });
+
+  // Sincronizar formulario del modal de edición cuando se abre con una acción
+  useEffect(() => {
+    if (!planAccionEditingItem) {
+      setPlanAccionEditForm(null);
+      return;
+    }
+    const item = planAccionEditingItem;
+    setPlanAccionEditForm({
+      nombre: item.nombre ?? '',
+      descripcion: item.descripcion ?? '',
+      responsable: item.responsable ?? '',
+      responsable_email: item.responsable_email ?? '',
+      fecha_limite: item.fecha_limite ? (item.fecha_limite instanceof Date ? item.fecha_limite.toISOString().slice(0, 10) : String(item.fecha_limite).slice(0, 10)) : '',
+      criticidad: item.criticidad ?? 'Medio',
+      estado: item.estado ?? 'Pendiente',
+      elemento_psm_id: item.elemento_psm_id != null ? Number(item.elemento_psm_id) : '',
+    });
+  }, [planAccionEditingItem]);
+
+  // Cargar sesiones, config, preguntas y plantas (para radar dinámico)
   useEffect(() => {
     fetchSessions();
     fetchConfig();
@@ -122,6 +183,73 @@ export default function App() {
     fetchCriteria();
     fetchUsers();
   }, []);
+
+  useEffect(() => {
+    const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
+    if (!token) return;
+    const base = (import.meta.env?.VITE_API_BASE_URL || '').replace(/\/$/, '');
+    fetch(`${base}/api/plantas`, { headers: { Authorization: `Bearer ${token}` } })
+      .then((r) => (r.ok ? r.json() : []))
+      .then((list: { id: number; nombre: string }[]) => {
+        setPlantas(Array.isArray(list) ? list : []);
+        if (list?.length && !centroIdRadar) setCentroIdRadar(list[0].id);
+      })
+      .catch(() => setPlantas([]));
+  }, []);
+
+  // Al entrar a la vista Plan de Acción, cargar ítems y lista de elementos PSM
+  useEffect(() => {
+    if (view === 'plan') {
+      fetchPlanAccion();
+      fetchElementosPsm();
+    }
+  }, [view]);
+
+  // Por defecto mostrar el diagnóstico más reciente en el radar; si no hay ninguno, datos por defecto
+  useEffect(() => {
+    if (!recentSessions.length) {
+      setRadarDiagnosticoId(null);
+      setRadarMadurezData(RADAR_DEFAULT);
+      return;
+    }
+    const ids = recentSessions.map((s: { id: number }) => s.id);
+    const currentExists = radarDiagnosticoId != null && ids.includes(radarDiagnosticoId);
+    if (!currentExists && recentSessions[0]?.id != null) {
+      setRadarDiagnosticoId(recentSessions[0].id);
+    }
+  }, [recentSessions]);
+
+  // Cargar datos del radar desde el setup de UN diagnóstico (el seleccionado); si no hay id, usar datos por defecto
+  useEffect(() => {
+    if (radarDiagnosticoId == null) {
+      setRadarMadurezData(RADAR_DEFAULT);
+      return;
+    }
+    const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
+    setRadarLoading(true);
+    fetch(`/api/diagnosticos/${radarDiagnosticoId}/setup`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((setup: Record<string, number> | null) => {
+        if (!setup) {
+          setRadarMadurezData(RADAR_DEFAULT);
+          return;
+        }
+        // Backend: dimensiones 1–4 → escalamos a 0–100 para el radar
+        const scale = (v: number) => (v != null && Number.isFinite(v) ? (v / 4) * 100 : 50);
+        setRadarMadurezData([
+          { subject: 'Riesgo técnico', value: scale(setup.riesgo_tecnico), fullMark: 100 },
+          { subject: 'Regulación', value: scale(setup.regulacion), fullMark: 100 },
+          { subject: 'Madurez', value: scale(setup.madurez), fullMark: 100 },
+          { subject: 'Estrategia', value: scale(setup.estrategia), fullMark: 100 },
+          { subject: 'Complejidad', value: scale(setup.complejidad), fullMark: 100 },
+          { subject: 'Exposición', value: scale(setup.exposicion), fullMark: 100 },
+        ]);
+      })
+      .catch(() => setRadarMadurezData(RADAR_DEFAULT))
+      .finally(() => setRadarLoading(false));
+  }, [radarDiagnosticoId]);
 
   const fetchQuestions = async () => {
     try {
@@ -156,6 +284,121 @@ export default function App() {
       }
     } catch (err) {
       console.error("Error fetching users:", err);
+    }
+  };
+
+  const getAuthHeaders = (): HeadersInit => {
+    const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
+    return token ? { Authorization: `Bearer ${token}` } : {};
+  };
+
+  const fetchPlanAccion = async () => {
+    setPlanAccionLoading(true);
+    try {
+      const res = await fetch('/api/plan-accion', { headers: getAuthHeaders() });
+      if (res.ok) {
+        const data = await res.json();
+        setPlanAccionItems(Array.isArray(data) ? data : []);
+      } else {
+        setPlanAccionItems([]);
+      }
+    } catch (err) {
+      console.error("Error fetching plan de acción:", err);
+      setPlanAccionItems([]);
+    } finally {
+      setPlanAccionLoading(false);
+    }
+  };
+
+  const fetchElementosPsm = async () => {
+    setElementosPsmLoading(true);
+    try {
+      const res = await fetch('/api/elementos-psm', { headers: getAuthHeaders() });
+      if (res.ok) {
+        const data = await res.json();
+        setElementosPsm(Array.isArray(data) ? data : []);
+      } else {
+        setElementosPsm([]);
+      }
+    } catch (err) {
+      console.error("Error fetching elementos PSM:", err);
+      setElementosPsm([]);
+    } finally {
+      setElementosPsmLoading(false);
+    }
+  };
+
+  const handleSavePlanAccionItem = async () => {
+    if (!planAccionEditingItem?.id || !planAccionEditForm) return;
+    try {
+      const res = await fetch(`/api/plan-accion/${planAccionEditingItem.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+        body: JSON.stringify({
+          nombre: planAccionEditForm.nombre,
+          descripcion: planAccionEditForm.descripcion || null,
+          responsable: planAccionEditForm.responsable || null,
+          responsable_email: planAccionEditForm.responsable_email || null,
+          fecha_limite: planAccionEditForm.fecha_limite || null,
+          criticidad: planAccionEditForm.criticidad,
+          estado: planAccionEditForm.estado,
+          elemento_psm_id: planAccionEditForm.elemento_psm_id === '' ? null : planAccionEditForm.elemento_psm_id,
+        }),
+      });
+      if (res.ok) {
+        await fetchPlanAccion();
+        setPlanAccionEditingItem(null);
+        setPlanAccionEditForm(null);
+      } else {
+        const err = await res.json().catch(() => ({}));
+        alert(err.error || 'Error al guardar');
+      }
+    } catch (err) {
+      console.error("Error saving plan action item:", err);
+      alert("Error de conexión al guardar.");
+    }
+  };
+
+  const handleCreatePlanAccionItem = async () => {
+    if (!planAccionNuevaForm.nombre?.trim()) {
+      alert('El nombre de la acción es obligatorio.');
+      return;
+    }
+    try {
+      const res = await fetch('/api/plan-accion', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+        body: JSON.stringify({
+          nombre: planAccionNuevaForm.nombre.trim(),
+          descripcion: planAccionNuevaForm.descripcion || null,
+          responsable: planAccionNuevaForm.responsable || null,
+          responsable_email: planAccionNuevaForm.responsable_email || null,
+          fecha_limite: planAccionNuevaForm.fecha_limite || null,
+          criticidad: planAccionNuevaForm.criticidad,
+          estado: planAccionNuevaForm.estado,
+          elemento_psm_id: planAccionNuevaForm.elemento_psm_id === '' ? null : planAccionNuevaForm.elemento_psm_id,
+        }),
+      });
+      if (res.ok) {
+        await fetchPlanAccion();
+        setPlanAccionNuevaOpen(false);
+        setPlanAccionNuevaForm({
+          nombre: '',
+          descripcion: '',
+          responsable: '',
+          responsable_email: '',
+          fecha_limite: '',
+          criticidad: 'Medio',
+          estado: 'Pendiente',
+          elemento_psm_id: '',
+        });
+      } else {
+        const err = await res.json().catch(() => ({}));
+        alert(err.error || 'Error al crear la acción');
+      }
+    } catch (err) {
+      console.error("Error creating plan action item:", err);
+      alert("Error de conexión al crear la acción.");
     }
   };
 
@@ -432,6 +675,75 @@ export default function App() {
             <div className="text-center py-12 text-gray-400 italic">No hay diagnósticos registrados aún.</div>
           )}
         </div>
+      </div>
+
+      {/* Radar de Madurez PSM: datos de UN diagnóstico seleccionado (o por defecto) */}
+      <div className="mt-12">
+        <div className="flex flex-wrap items-center justify-between gap-4 mb-4">
+          <p className="text-sm text-gray-500">
+            Los datos del radar provienen de <strong>un solo diagnóstico</strong>. Elige cuál ver abajo.
+          </p>
+          <label className="flex items-center gap-2 text-sm">
+            <span className="text-gray-500">Origen de datos:</span>
+            <select
+              value={radarDiagnosticoId ?? ''}
+              onChange={(e) => setRadarDiagnosticoId(e.target.value ? Number(e.target.value) : null)}
+              className="px-3 py-1.5 rounded-lg border border-gray-200 bg-white text-gray-900 font-medium focus:ring-2 focus:ring-brand-green/20 outline-none"
+            >
+              <option value="">Datos por defecto</option>
+              {recentSessions.map((s: { id: number; installation_name?: string; created_at?: string }) => (
+                <option key={s.id} value={s.id}>
+                  {s.installation_name ?? `Diagnóstico #${s.id}`} — {s.created_at ? new Date(s.created_at).toLocaleDateString('es') : s.id}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+        {radarLoading && (
+          <div className="flex items-center justify-center py-8 text-gray-500">
+            <div className="w-6 h-6 border-2 border-brand-green border-t-transparent rounded-full animate-spin mr-2" />
+            Cargando datos del diagnóstico…
+          </div>
+        )}
+        {!radarLoading && (
+          <RadarMadurezPSM
+            data={radarMadurezData}
+            title={radarDiagnosticoId ? `Radar de Madurez PSM — Diagnóstico #${radarDiagnosticoId}` : 'Radar de Madurez PSM (datos por defecto)'}
+            height={420}
+            showLegend
+            fullMark={100}
+          />
+        )}
+      </div>
+
+      {/* Radar de Madurez Dinámico — 20 elementos CCPS, base + mejoras del plan de acción */}
+      <div className="mt-12">
+        <div className="flex flex-wrap items-center justify-between gap-4 mb-4">
+          <p className="text-sm text-gray-500">
+            No se promedian todos los diagnósticos: la <strong>base es solo el último</strong> del centro. <strong>Inicial</strong> = ese diagnóstico; <strong>Actual</strong> = base + tareas completadas del plan; <strong>Meta</strong> = 100%. Para comparar con un diagnóstico anterior se puede usar el parámetro histórico en el API.
+          </p>
+          {plantas.length > 0 && (
+            <label className="flex items-center gap-2 text-sm">
+              <span className="text-gray-500">Centro (planta):</span>
+              <select
+                value={centroIdRadar ?? ''}
+                onChange={(e) => setCentroIdRadar(e.target.value ? Number(e.target.value) : null)}
+                className="px-3 py-1.5 rounded-lg border border-gray-200 bg-white text-gray-900 font-medium focus:ring-2 focus:ring-brand-green/20 outline-none"
+              >
+                {plantas.map((p) => (
+                  <option key={p.id} value={p.id}>{p.nombre}</option>
+                ))}
+              </select>
+            </label>
+          )}
+        </div>
+        {centroIdRadar != null ? (
+          <PSMRadar centroId={centroIdRadar} height={520} />
+        ) : (
+          <div className="bg-white rounded-2xl border border-gray-200 p-8 text-center text-gray-500">
+            Inicia sesión y selecciona un centro (planta) para ver el Radar de Madurez Dinámico, o crea plantas en Configuración.
+          </div>
+        )}
       </div>
     </div>
   );
@@ -1445,6 +1757,355 @@ export default function App() {
             exit={{ opacity: 0, x: -20 }}
           >
             <DiagnosisView />
+          </motion.div>
+        )}
+        {view === 'plan' && (
+          <motion.div
+            key="plan"
+            initial={{ opacity: 0, x: 20 }}
+            animate={{ opacity: 1, x: 0 }}
+            exit={{ opacity: 0, x: -20 }}
+            className="max-w-6xl mx-auto py-12 px-8"
+          >
+            <Header
+              title="Plan de Acción"
+              subtitle="Gestión de acciones correctivas y medidas de mitigación por centro."
+              onBack={() => setView('home')}
+            />
+            <div className="flex justify-end mb-4">
+              <button
+                type="button"
+                onClick={() => {
+                  setPlanAccionNuevaOpen(true);
+                  fetchElementosPsm();
+                }}
+                className="px-5 py-2.5 bg-gray-900 text-white rounded-xl font-bold text-sm hover:bg-gray-800 flex items-center gap-2"
+              >
+                <Plus className="w-4 h-4" /> Nueva acción de corrección
+              </button>
+            </div>
+            {planAccionLoading ? (
+              <div className="flex items-center justify-center py-16 text-gray-500">
+                <div className="w-8 h-8 border-2 border-brand-green border-t-transparent rounded-full animate-spin mr-3" />
+                Cargando plan de acción…
+              </div>
+            ) : (
+              <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left text-sm">
+                    <thead className="bg-gray-50 border-b border-gray-100">
+                      <tr>
+                        <th className="px-6 py-4 font-bold text-gray-400 uppercase text-[10px]">Acción</th>
+                        <th className="px-6 py-4 font-bold text-gray-400 uppercase text-[10px]">Planta</th>
+                        <th className="px-6 py-4 font-bold text-gray-400 uppercase text-[10px]">Elemento PSM</th>
+                        <th className="px-6 py-4 font-bold text-gray-400 uppercase text-[10px]">Estado</th>
+                        <th className="px-6 py-4 font-bold text-gray-400 uppercase text-[10px]">Criticidad</th>
+                        <th className="px-6 py-4 font-bold text-gray-400 uppercase text-[10px]">Acciones</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-50">
+                      {planAccionItems.length === 0 ? (
+                        <tr>
+                          <td colSpan={6} className="px-6 py-12 text-center text-gray-500">
+                            No hay ítems en el plan de acción. Crea acciones desde un diagnóstico o importa desde el análisis IA.
+                          </td>
+                        </tr>
+                      ) : (
+                        planAccionItems.map((item) => (
+                          <tr key={item.id} className="hover:bg-gray-50/50 transition-colors">
+                            <td className="px-6 py-4 font-medium text-gray-900 max-w-xs truncate" title={item.nombre}>{item.nombre}</td>
+                            <td className="px-6 py-4 text-gray-600">{item.planta_nombre ?? '—'}</td>
+                            <td className="px-6 py-4 text-gray-600">{item.elemento_psm_nombre ?? item.elemento_psm ?? '—'}</td>
+                            <td className="px-6 py-4">
+                              <span className={`px-2 py-1 rounded text-[10px] font-bold ${
+                                item.estado === 'Completado' ? 'bg-emerald-100 text-emerald-700' :
+                                item.estado === 'En Progreso' ? 'bg-amber-100 text-amber-700' : 'bg-gray-100 text-gray-600'
+                              }`}>
+                                {item.estado}
+                              </span>
+                            </td>
+                            <td className="px-6 py-4">
+                              <span className={`px-2 py-1 rounded text-[10px] font-bold ${
+                                item.criticidad === 'Crítico' ? 'bg-red-100 text-red-700' :
+                                item.criticidad === 'Alto' ? 'bg-orange-100 text-orange-700' :
+                                item.criticidad === 'Medio' ? 'bg-amber-100 text-amber-700' : 'bg-gray-100 text-gray-600'
+                              }`}>
+                                {item.criticidad}
+                              </span>
+                            </td>
+                            <td className="px-6 py-4">
+                              <button
+                                onClick={() => setPlanAccionEditingItem(item)}
+                                className="p-2 hover:bg-gray-100 rounded-lg text-gray-500 hover:text-brand-green transition-colors"
+                                title="Editar acción"
+                              >
+                                <Eye className="w-4 h-4" />
+                              </button>
+                            </td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+
+            {/* Modal Nueva acción de corrección — Elemento PSM como dropdown (Selecciona un elemento) */}
+            {planAccionNuevaOpen && (
+              <div className="fixed inset-0 bg-gray-900/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+                <div className="bg-white rounded-3xl p-8 max-w-lg w-full shadow-2xl max-h-[90vh] overflow-y-auto">
+                  <h3 className="text-xl font-bold mb-6">Nueva acción de corrección</h3>
+                  <div className="space-y-4">
+                    <div>
+                      <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Nombre de la acción</label>
+                      <input
+                        value={planAccionNuevaForm.nombre}
+                        onChange={(e) => setPlanAccionNuevaForm({ ...planAccionNuevaForm, nombre: e.target.value })}
+                        className="w-full px-4 py-2.5 rounded-xl border border-gray-200 focus:ring-2 focus:ring-brand-green/20 outline-none"
+                        placeholder="Descripción breve de la acción"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Elemento PSM</label>
+                      <div className="relative rounded-xl border-2 border-gray-200 bg-gray-50/80 focus-within:border-brand-green/50 focus-within:ring-2 focus-within:ring-brand-green/20">
+                        <select
+                          value={planAccionNuevaForm.elemento_psm_id === '' ? '' : String(planAccionNuevaForm.elemento_psm_id)}
+                          onChange={(e) => setPlanAccionNuevaForm({
+                            ...planAccionNuevaForm,
+                            elemento_psm_id: e.target.value === '' ? '' : Number(e.target.value),
+                          })}
+                          disabled={elementosPsmLoading}
+                          className="w-full min-h-[44px] pl-4 pr-11 py-2.5 rounded-xl border-0 bg-transparent focus:ring-0 outline-none disabled:opacity-60 disabled:cursor-not-allowed text-gray-900 cursor-pointer font-medium"
+                          style={{ WebkitAppearance: 'menulist', MozAppearance: 'menulist', appearance: 'menulist' }}
+                        >
+                          <option value="">
+                            {elementosPsmLoading ? 'Cargando...' : 'Selecciona un elemento'}
+                          </option>
+                          {elementosPsm.map((el) => (
+                            <option key={el.id} value={String(el.id)}>{el.nombre}</option>
+                          ))}
+                        </select>
+                        <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-gray-500">
+                          <ChevronDown className="w-5 h-5" aria-hidden />
+                        </span>
+                      </div>
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Descripción</label>
+                      <textarea
+                        value={planAccionNuevaForm.descripcion}
+                        onChange={(e) => setPlanAccionNuevaForm({ ...planAccionNuevaForm, descripcion: e.target.value })}
+                        className="w-full px-4 py-2.5 rounded-xl border border-gray-200 focus:ring-2 focus:ring-brand-green/20 outline-none h-24"
+                        placeholder="Detalle opcional"
+                      />
+                    </div>
+                    <div className="grid grid-cols-2 gap-4">
+                      <div>
+                        <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Responsable</label>
+                        <input
+                          value={planAccionNuevaForm.responsable}
+                          onChange={(e) => setPlanAccionNuevaForm({ ...planAccionNuevaForm, responsable: e.target.value })}
+                          className="w-full px-4 py-2.5 rounded-xl border border-gray-200 focus:ring-2 focus:ring-brand-green/20 outline-none"
+                          placeholder="Nombre o cargo"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Email responsable</label>
+                        <input
+                          type="email"
+                          value={planAccionNuevaForm.responsable_email}
+                          onChange={(e) => setPlanAccionNuevaForm({ ...planAccionNuevaForm, responsable_email: e.target.value })}
+                          className="w-full px-4 py-2.5 rounded-xl border border-gray-200 focus:ring-2 focus:ring-brand-green/20 outline-none"
+                          placeholder="email@ejemplo.com"
+                        />
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-2 gap-4">
+                      <div>
+                        <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Fecha límite</label>
+                        <input
+                          type="date"
+                          value={planAccionNuevaForm.fecha_limite}
+                          onChange={(e) => setPlanAccionNuevaForm({ ...planAccionNuevaForm, fecha_limite: e.target.value })}
+                          className="w-full px-4 py-2.5 rounded-xl border border-gray-200 focus:ring-2 focus:ring-brand-green/20 outline-none"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Criticidad</label>
+                        <select
+                          value={planAccionNuevaForm.criticidad}
+                          onChange={(e) => setPlanAccionNuevaForm({ ...planAccionNuevaForm, criticidad: e.target.value })}
+                          className="w-full px-4 py-2.5 rounded-xl border border-gray-200 focus:ring-2 focus:ring-brand-green/20 outline-none"
+                        >
+                          <option value="Crítico">Crítico</option>
+                          <option value="Alto">Alto</option>
+                          <option value="Medio">Medio</option>
+                          <option value="Bajo">Bajo</option>
+                        </select>
+                      </div>
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Estado</label>
+                      <select
+                        value={planAccionNuevaForm.estado}
+                        onChange={(e) => setPlanAccionNuevaForm({ ...planAccionNuevaForm, estado: e.target.value })}
+                        className="w-full px-4 py-2.5 rounded-xl border border-gray-200 focus:ring-2 focus:ring-brand-green/20 outline-none"
+                      >
+                        <option value="Pendiente">Pendiente</option>
+                        <option value="En Progreso">En Progreso</option>
+                        <option value="Completado">Completado</option>
+                        <option value="Cancelado">Cancelado</option>
+                      </select>
+                    </div>
+                  </div>
+                  <div className="flex justify-end gap-3 mt-8">
+                    <button
+                      type="button"
+                      onClick={() => setPlanAccionNuevaOpen(false)}
+                      className="px-4 py-2 font-bold text-gray-500 hover:text-gray-700"
+                    >
+                      Cancelar
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleCreatePlanAccionItem}
+                      className="px-8 py-2 bg-gray-900 text-white rounded-xl font-bold hover:bg-gray-800"
+                    >
+                      Crear acción
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Modal Editar Acción — ELEMENTO PSM es un dropdown (select), no input de texto */}
+            {planAccionEditingItem && planAccionEditForm && (
+              <div className="fixed inset-0 bg-gray-900/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+                <div className="bg-white rounded-3xl p-8 max-w-lg w-full shadow-2xl max-h-[90vh] overflow-y-auto">
+                  <h3 className="text-xl font-bold mb-6">Editar Acción</h3>
+                  <div className="space-y-4">
+                    <div>
+                      <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Nombre de la acción</label>
+                      <input
+                        value={planAccionEditForm.nombre}
+                        onChange={(e) => setPlanAccionEditForm({ ...planAccionEditForm, nombre: e.target.value })}
+                        className="w-full px-4 py-2.5 rounded-xl border border-gray-200 focus:ring-2 focus:ring-brand-green/20 outline-none"
+                        placeholder="Descripción breve de la acción"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Elemento PSM</label>
+                      <div className="relative rounded-xl border-2 border-gray-200 bg-gray-50/80 focus-within:border-brand-green/50 focus-within:ring-2 focus-within:ring-brand-green/20">
+                        <select
+                          value={planAccionEditForm.elemento_psm_id === '' ? '' : String(planAccionEditForm.elemento_psm_id)}
+                          onChange={(e) => setPlanAccionEditForm({
+                            ...planAccionEditForm,
+                            elemento_psm_id: e.target.value === '' ? '' : Number(e.target.value),
+                          })}
+                          disabled={elementosPsmLoading}
+                          className="w-full min-h-[44px] pl-4 pr-11 py-2.5 rounded-xl border-0 bg-transparent focus:ring-0 outline-none disabled:opacity-60 disabled:cursor-not-allowed text-gray-900 cursor-pointer font-medium"
+                          style={{ WebkitAppearance: 'menulist', MozAppearance: 'menulist', appearance: 'menulist' }}
+                        >
+                          <option value="">
+                            {elementosPsmLoading ? 'Cargando...' : 'Selecciona un elemento'}
+                          </option>
+                          {elementosPsm.map((el) => (
+                            <option key={el.id} value={String(el.id)}>{el.nombre}</option>
+                          ))}
+                        </select>
+                        <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-gray-500">
+                          <ChevronDown className="w-5 h-5" aria-hidden />
+                        </span>
+                      </div>
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Descripción</label>
+                      <textarea
+                        value={planAccionEditForm.descripcion}
+                        onChange={(e) => setPlanAccionEditForm({ ...planAccionEditForm, descripcion: e.target.value })}
+                        className="w-full px-4 py-2.5 rounded-xl border border-gray-200 focus:ring-2 focus:ring-brand-green/20 outline-none h-24"
+                        placeholder="Detalle opcional"
+                      />
+                    </div>
+                    <div className="grid grid-cols-2 gap-4">
+                      <div>
+                        <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Responsable</label>
+                        <input
+                          value={planAccionEditForm.responsable}
+                          onChange={(e) => setPlanAccionEditForm({ ...planAccionEditForm, responsable: e.target.value })}
+                          className="w-full px-4 py-2.5 rounded-xl border border-gray-200 focus:ring-2 focus:ring-brand-green/20 outline-none"
+                          placeholder="Nombre o cargo"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Email responsable</label>
+                        <input
+                          type="email"
+                          value={planAccionEditForm.responsable_email}
+                          onChange={(e) => setPlanAccionEditForm({ ...planAccionEditForm, responsable_email: e.target.value })}
+                          className="w-full px-4 py-2.5 rounded-xl border border-gray-200 focus:ring-2 focus:ring-brand-green/20 outline-none"
+                          placeholder="email@ejemplo.com"
+                        />
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-2 gap-4">
+                      <div>
+                        <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Fecha límite</label>
+                        <input
+                          type="date"
+                          value={planAccionEditForm.fecha_limite}
+                          onChange={(e) => setPlanAccionEditForm({ ...planAccionEditForm, fecha_limite: e.target.value })}
+                          className="w-full px-4 py-2.5 rounded-xl border border-gray-200 focus:ring-2 focus:ring-brand-green/20 outline-none"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Criticidad</label>
+                        <select
+                          value={planAccionEditForm.criticidad}
+                          onChange={(e) => setPlanAccionEditForm({ ...planAccionEditForm, criticidad: e.target.value })}
+                          className="w-full px-4 py-2.5 rounded-xl border border-gray-200 focus:ring-2 focus:ring-brand-green/20 outline-none"
+                        >
+                          <option value="Crítico">Crítico</option>
+                          <option value="Alto">Alto</option>
+                          <option value="Medio">Medio</option>
+                          <option value="Bajo">Bajo</option>
+                        </select>
+                      </div>
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Estado</label>
+                      <select
+                        value={planAccionEditForm.estado}
+                        onChange={(e) => setPlanAccionEditForm({ ...planAccionEditForm, estado: e.target.value })}
+                        className="w-full px-4 py-2.5 rounded-xl border border-gray-200 focus:ring-2 focus:ring-brand-green/20 outline-none"
+                      >
+                        <option value="Pendiente">Pendiente</option>
+                        <option value="En Progreso">En Progreso</option>
+                        <option value="Completado">Completado</option>
+                        <option value="Cancelado">Cancelado</option>
+                      </select>
+                    </div>
+                  </div>
+                  <div className="flex justify-end gap-3 mt-8">
+                    <button
+                      type="button"
+                      onClick={() => { setPlanAccionEditingItem(null); setPlanAccionEditForm(null); }}
+                      className="px-4 py-2 font-bold text-gray-500 hover:text-gray-700"
+                    >
+                      Cancelar
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleSavePlanAccionItem}
+                      className="px-8 py-2 bg-brand-green text-white rounded-xl font-bold hover:bg-brand-green/90"
+                    >
+                      Guardar Cambios
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
           </motion.div>
         )}
         {view === 'config' && (

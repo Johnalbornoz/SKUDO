@@ -9,7 +9,7 @@ import { useState, useEffect, useCallback } from 'react';
 import {
   CheckCircle2, Circle, ChevronDown, ChevronUp,
   BookOpen, Info, AlertTriangle, Lock, RefreshCw,
-  FileText, Target,
+  FileText, Target, LockKeyhole,
 } from 'lucide-react';
 import apiService, { API_BASE_URL } from '../services/apiService';
 import { useAuth } from '../contexts/AuthContext';
@@ -202,10 +202,12 @@ function GrupoCategoria({ nombre, preguntas, soloLectura, onResponder, saving })
 
 export default function DiagnosticoView({ diagnosticoId, faseActual = 2, onNavegar, onCerrar, onIrAIA }) {
   const { usuario } = useAuth();
-  const [datos,    setDatos]    = useState(null);  // { nivel, total, respondidas, grupos, estado_diagnostico }
+  const [datos,    setDatos]    = useState(null);  // { nivel, total, respondidas, grupos, estado_diagnostico, alcance_confirmado }
   const [loading,  setLoading]  = useState(true);
   const [saving,   setSaving]   = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
+  const [alcanceConfirmado, setAlcanceConfirmado] = useState(false);
+  const [confirmandoAlcance, setConfirmandoAlcance] = useState(false);
 
   const soloLectura =
     datos?.estado_diagnostico === 'Finalizado' ||
@@ -216,12 +218,17 @@ export default function DiagnosticoView({ diagnosticoId, faseActual = 2, onNaveg
     setLoading(true);
     setErrorMsg('');
     try {
-      const res = await fetch(
-        `${API_BASE_URL}/diagnosticos/${diagnosticoId}/preguntas`,
-        { headers: { Authorization: `Bearer ${localStorage.getItem('skudo_token')}` } }
-      );
-      if (!res.ok) throw new Error(`Error ${res.status}`);
-      setDatos(await res.json());
+      const [resPreg, resAlcance] = await Promise.all([
+        fetch(
+          `${API_BASE_URL}/diagnosticos/${diagnosticoId}/preguntas`,
+          { headers: { Authorization: `Bearer ${localStorage.getItem('skudo_token')}` } }
+        ),
+        apiService.fetchAlcanceConfirmado(diagnosticoId).catch(() => ({ confirmado: false, total: 0 })),
+      ]);
+      if (!resPreg.ok) throw new Error(`Error ${resPreg.status}`);
+      const datosPreg = await resPreg.json();
+      setDatos(datosPreg);
+      setAlcanceConfirmado(!!resAlcance?.confirmado);
     } catch (e) {
       setErrorMsg(e.message);
     } finally {
@@ -258,6 +265,19 @@ export default function DiagnosticoView({ diagnosticoId, faseActual = 2, onNaveg
       alert('Error al guardar respuesta: ' + e.message);
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function handleConfirmarAlcance() {
+    setConfirmandoAlcance(true);
+    try {
+      await apiService.confirmarAlcance(diagnosticoId);
+      setAlcanceConfirmado(true);
+      await cargar();
+    } catch (e) {
+      alert('Error al confirmar alcance: ' + (e?.message || e));
+    } finally {
+      setConfirmandoAlcance(false);
     }
   }
 
@@ -331,15 +351,37 @@ export default function DiagnosticoView({ diagnosticoId, faseActual = 2, onNaveg
             <span className="text-sm font-bold text-gray-700 shrink-0 w-12 text-right">{pct}%</span>
           </div>
 
-          {/* Leyenda de complejidad */}
-          <div className="flex items-center gap-2 mt-2 flex-wrap">
-            <span className="text-[10px] text-gray-400 font-medium uppercase tracking-wide">Complejidad:</span>
-            {[1, 2, 3, 4, 5].filter((c) => c <= (datos?.nivel ?? 1)).map((c) => (
-              <span key={c} className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold ${COMPLEJIDAD_COLOR[c]}`}>
-                C{c}
-              </span>
-            ))}
-            <span className="text-[10px] text-gray-400 ml-1">— preguntas incluidas según Perfil de Riesgo</span>
+          {/* Leyenda de complejidad + Confirmar alcance */}
+          <div className="flex items-center gap-2 mt-2 flex-wrap justify-between">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="text-[10px] text-gray-400 font-medium uppercase tracking-wide">Complejidad:</span>
+              {[1, 2, 3, 4, 5].filter((c) => c <= (datos?.nivel ?? 1)).map((c) => (
+                <span key={c} className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold ${COMPLEJIDAD_COLOR[c]}`}>
+                  C{c}
+                </span>
+              ))}
+              <span className="text-[10px] text-gray-400 ml-1">— preguntas según Perfil de Riesgo</span>
+            </div>
+            {!soloLectura && datos?.total > 0 && (
+              <div className="flex items-center gap-2">
+                {alcanceConfirmado ? (
+                  <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-green-700 bg-green-100 border border-green-200 px-2.5 py-1 rounded-lg">
+                    <LockKeyhole className="w-3.5 h-3.5" />
+                    Alcance confirmado ({datos.total} preguntas congeladas)
+                  </span>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={handleConfirmarAlcance}
+                    disabled={confirmandoAlcance}
+                    className="inline-flex items-center gap-1.5 text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-700 border border-indigo-700 px-2.5 py-1 rounded-lg disabled:opacity-60 transition-colors"
+                  >
+                    {confirmandoAlcance ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <LockKeyhole className="w-3.5 h-3.5" />}
+                    {confirmandoAlcance ? 'Confirmando…' : 'Confirmar alcance (congelar preguntas)'}
+                  </button>
+                )}
+              </div>
+            )}
           </div>
         </div>
 

@@ -32,7 +32,13 @@ export function AuthProvider({ children }) {
 
   return (
     <AuthContext.Provider
-      value={{ token, usuario, login, logout, isAuthenticated: !!token }}
+      value={{
+        token,
+        usuario, // { id, email, nombre, rol, tenant_id } — rol usado para Maker-Checker y permisos
+        login,
+        logout,
+        isAuthenticated: !!token,
+      }}
     >
       {children}
     </AuthContext.Provider>

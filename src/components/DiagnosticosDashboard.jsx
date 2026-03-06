@@ -488,7 +488,6 @@ function HistoricoRow({ d, onContinuar, onActualizar }) {
         <td className="px-4 py-3 text-sm text-gray-500">{d.consultor_nombre ?? '—'}</td>
         <td className="px-4 py-3">
           <div className="flex items-center justify-end gap-2">
-            {/* Botón expandir análisis IA */}
             <button type="button" onClick={handleExpandir}
               className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors ${
                 expandido
@@ -499,7 +498,6 @@ function HistoricoRow({ d, onContinuar, onActualizar }) {
               {cargandoAI ? 'Cargando…' : expandido ? 'Ocultar' : 'Ver Análisis'}
               {expandido ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
             </button>
-            {/* Botón descargar */}
             <button type="button" onClick={() => apiService.descargarReporte(d.id).catch(e => alert(e.message))}
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-gray-100 hover:bg-gray-200 text-gray-700">
               <Download className="w-3.5 h-3.5" /> Word
@@ -547,6 +545,7 @@ export default function DiagnosticosDashboard({ onContinuar, onNuevoDiagnostico,
   const [loading,      setLoading]      = useState(true);
   const [filtroPl,     setFiltroPl]     = useState('');
   const [filtroAr,     setFiltroAr]     = useState('');
+  const [limpiando,    setLimpiando]    = useState(false);
 
   const cargar = useCallback(async () => {
     setLoading(true);
@@ -567,6 +566,28 @@ export default function DiagnosticosDashboard({ onContinuar, onNuevoDiagnostico,
   function handleActualizarDiag(id) {
     // Refresca solo el diagnóstico actualizado
     apiService.fetchDiagnosticos().then(data => setDiagnosticos(data)).catch(() => {});
+  }
+
+  async function handleLimpiarFinalizados() {
+    const esSuperAdmin = usuario?.rol === 'SuperAdmin';
+    if (!esSuperAdmin) return;
+    try {
+      const preview = await apiService.previewLimpiarDiagnosticosFinalizados();
+      const total = preview?.total ?? 0;
+      if (total === 0) {
+        alert('No hay diagnósticos finalizados que eliminar.');
+        return;
+      }
+      if (!window.confirm(`Se eliminarán ${total} diagnóstico(s) finalizado(s) de la base de datos. Esta acción no se puede deshacer. ¿Continuar?`)) return;
+      setLimpiando(true);
+      const res = await apiService.limpiarDiagnosticosFinalizados();
+      alert(res?.mensaje ?? `Se eliminaron ${res?.eliminados ?? 0} diagnóstico(s).`);
+      cargar();
+    } catch (e) {
+      alert('Error: ' + (e.message ?? 'No se pudo completar la limpieza.'));
+    } finally {
+      setLimpiando(false);
+    }
   }
 
   useEffect(() => {
@@ -601,6 +622,18 @@ export default function DiagnosticosDashboard({ onContinuar, onNuevoDiagnostico,
           </p>
         </div>
         <div className="flex items-center gap-2">
+          {usuario?.rol === 'SuperAdmin' && (
+            <button
+              type="button"
+              onClick={handleLimpiarFinalizados}
+              disabled={limpiando}
+              className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium text-red-700 bg-red-50 hover:bg-red-100 border border-red-200 disabled:opacity-60 disabled:cursor-not-allowed"
+              title="Eliminar todos los diagnósticos finalizados de la base de datos"
+            >
+              {limpiando ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />}
+              {limpiando ? 'Limpiando…' : 'Limpiar finalizados'}
+            </button>
+          )}
           <button type="button" onClick={cargar}
             className="p-2 rounded-lg text-gray-400 hover:text-gray-700 hover:bg-gray-100" title="Actualizar">
             <RefreshCw className="w-4 h-4" />
