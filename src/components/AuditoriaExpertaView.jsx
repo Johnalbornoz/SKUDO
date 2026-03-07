@@ -187,13 +187,16 @@ export default function AuditoriaExpertaView({
     return true;
   });
 
-  // ── Estado de carga ──────────────────────────────────────────────────────────
+  // ── Estado de carga (persistente: preguntas + análisis IA pueden tardar con muchos documentos) ──
   if (loading) {
     return (
       <div className="min-h-screen bg-gray-50 flex items-center justify-center">
-        <div className="text-center">
+        <div className="text-center max-w-md px-4">
           <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-green-500 mx-auto mb-4" />
-          <p className="text-gray-500 font-medium">Cargando matriz de validación experta…</p>
+          <p className="text-gray-700 font-medium">Cargando preguntas y análisis de IA…</p>
+          <p className="text-gray-500 text-sm mt-2">
+            La IA está analizando múltiples fuentes de evidencia, esto puede tomar hasta un minuto.
+          </p>
         </div>
       </div>
     );

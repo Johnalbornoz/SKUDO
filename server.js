@@ -1,6 +1,5 @@
 import 'dotenv/config';
 import express from 'express';
-import cors from 'cors';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
 import pkg from 'pg';
@@ -113,6 +112,21 @@ if (!process.env.JWT_SECRET) {
 
 const app = express();
 
+// ─── CORS: prioridad absoluta (antes de body-parser, logging y rutas). Evita 502/CORS cuando el proxy corta antes de responder.
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  if (origin && (origin.includes('vercel.app') || origin.includes('localhost'))) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+  }
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, PATCH');
+  res.setHeader('Access-Control-Allow-Headers', 'X-Requested-With, Content-Type, Authorization');
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
+  if (req.method === 'OPTIONS') {
+    return res.status(204).end();
+  }
+  next();
+});
+
 // ── Almacenamiento de archivos ────────────────────────────────────────────────
 const UPLOADS_DIR = path.join(__dirname, 'uploads');
 fs.mkdirSync(UPLOADS_DIR, { recursive: true });
@@ -162,13 +176,47 @@ async function extractText(filePath, mimetype) {
   } catch { return null; }
 }
 
-// Llama a Gemini desde el servidor con un prompt técnico PSM
+// ─── System Prompt dinámico (BD) + fallback ─────────────────────────────────
+const DEFAULT_SYSTEM_PROMPT = `Eres un Auditor Senior en Seguridad de Procesos (PSM) con expertise en normas OSHA, CCPS y marcos regulatorios (ej. Decreto 1347 de 2021, Colombia). Tu rol es evaluar evidencia documental, entrevistas y hallazgos de campo para determinar el nivel de cumplimiento de cada requisito PSM. Responde de forma estructurada, objetiva y basada únicamente en la evidencia proporcionada. Usa terminología técnica PSM/CCPS cuando sea relevante.`;
+
+/**
+ * Obtiene el system prompt para Gemini desde la tabla configuracion.
+ * Si no hay valor, hay error de BD o está vacío, devuelve DEFAULT_SYSTEM_PROMPT.
+ * @returns {Promise<string>}
+ */
+async function getSystemPromptForGemini() {
+  try {
+    const { rows } = await pool.query(
+      'SELECT system_prompt FROM configuracion WHERE id = 1 LIMIT 1'
+    );
+    const value = rows[0]?.system_prompt;
+    if (value != null && String(value).trim() !== '') {
+      return String(value).trim();
+    }
+  } catch (err) {
+    if (err.code !== '42P01') {
+      console.warn('[Gemini] No se pudo cargar system_prompt desde configuracion:', err.message);
+    }
+  }
+  return DEFAULT_SYSTEM_PROMPT;
+}
+
+// Llama a Gemini desde el servidor con prompt de usuario y system instruction desde BD (o fallback)
 async function geminiAnalizar(prompt) {
   const apiKey = process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY;
   if (!apiKey) throw new Error('GEMINI_API_KEY no configurada en .env. Añade GEMINI_API_KEY=tu-api-key en la raíz del proyecto (archivo .env). Obtén la clave en: https://aistudio.google.com/apikey');
+
+  const systemInstruction = await getSystemPromptForGemini();
+
   const { GoogleGenerativeAI } = await import('@google/generative-ai');
-  const model = new GoogleGenerativeAI(apiKey).getGenerativeModel({ model: 'gemini-2.5-flash' });
+  const model = new GoogleGenerativeAI(apiKey).getGenerativeModel({
+    model: 'gemini-2.5-flash',
+    systemInstruction,
+  });
+  const t0 = Date.now();
   const result = await model.generateContent(prompt);
+  const elapsed = Date.now() - t0;
+  console.log(`[Gemini] Respuesta en ${elapsed} ms`);
   return result.response.text();
 }
 
@@ -219,28 +267,6 @@ function parseJsonFromGemini(raw) {
   }
   return { parsed: null, raw };
 }
-
-// ─── CORS: lista de orígenes permitidos (Render + Vercel + local) ──────────────
-const CORS_ALLOWED_ORIGINS = [
-  'https://skudo.vercel.app',
-  'http://localhost:5173',
-];
-const CORS_VERCEL_ANY = /^https:\/\/[^/]+\.vercel\.app$/;
-const CORS_LOCALHOST = /^http:\/\/localhost(:\d+)?$/;
-
-app.use(cors({
-  origin: function (origin, callback) {
-    if (!origin) return callback(null, true);
-    if (CORS_ALLOWED_ORIGINS.includes(origin)) return callback(null, true);
-    if (CORS_VERCEL_ANY.test(origin)) return callback(null, true);
-    if (CORS_LOCALHOST.test(origin)) return callback(null, true);
-    callback(null, false); // no enviar CORS headers → el navegador bloquea; evita 500
-  },
-  credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
-  optionsSuccessStatus: 204,
-}));
 
 // Límites de datos altos para triangulación y payloads grandes (evitar bloqueo del fetch)
 app.use(express.json({ limit: '50mb' }));
@@ -1696,6 +1722,7 @@ app.delete('/api/diagnosticos/:id/documentos/:docId', verificarToken, async (req
 
 // POST /api/diagnosticos/:id/documentos/:docId/analizar  – análisis IA por documento
 app.post('/api/diagnosticos/:id/documentos/:docId/analizar', verificarToken, async (req, res) => {
+  res.setTimeout(120000); // 2 minutos: análisis IA con múltiples documentos
   const diagId = Number(req.params.id);
   const docId  = Number(req.params.docId);
   try {
@@ -1731,8 +1758,9 @@ app.post('/api/diagnosticos/:id/documentos/:docId/analizar', verificarToken, asy
       ? preguntasAlcance.map((p, i) => `  ${i + 1}. [ID:${p.id}] [${p.elemento}] ${p.pregunta}`).join('\n')
       : 'No hay preguntas normativas registradas para este diagnóstico.';
 
+    // Reducir payload a Gemini: texto esencial (máx 4500 chars) para evitar timeout
     const textoDoc = doc.texto_extraido
-      ? doc.texto_extraido.slice(0, 8000)
+      ? doc.texto_extraido.slice(0, 4500)
       : '(Documento sin texto extraíble — imagen o formato no soportado)';
 
     const prompt = `Actúa como Consultor Senior certificado en Seguridad de Procesos (PSM) bajo el marco normativo colombiano: Decreto 1347 de 2021 y Resolución 5492 de 2024.
@@ -1935,6 +1963,7 @@ app.get('/api/diagnosticos/:id/precalificacion', verificarToken, async (req, res
 
 // POST /api/diagnosticos/:id/triangular – análisis cruzado de todos los documentos + entrevistas
 app.post('/api/diagnosticos/:id/triangular', verificarToken, async (req, res) => {
+  res.setTimeout(120000); // 2 minutos: triangulación con múltiples fuentes
   const diagId = Number(req.params.id);
   try {
     const [{ rows: docs }, { rows: entrevistas }, { rows: preguntas }, { rows: [diag] }] = await Promise.all([
@@ -1944,12 +1973,18 @@ app.post('/api/diagnosticos/:id/triangular', verificarToken, async (req, res) =>
       pool.query(`SELECT nivel_calculado FROM diagnosticos WHERE id=$1`, [diagId]),
     ]);
 
-    const resumenDocs = docs.map(d =>
-      `### [${d.categoria}] ${d.nombre_original}\n${(d.analisis_ia ?? d.texto_extraido ?? '').slice(0, 2000)}`
-    ).join('\n\n---\n\n');
+    // Resumen esencial para Gemini: preferir analisis_ia (más corto) y limitar caracteres para reducir timeout
+    const MAX_DOC_CHARS = 1200;
+    const MAX_ENTREV_CHARS = 800;
+    const resumenDocs = docs.map(d => {
+      const contenido = (d.analisis_ia && String(d.analisis_ia).length < MAX_DOC_CHARS)
+        ? String(d.analisis_ia).slice(0, MAX_DOC_CHARS)
+        : (d.texto_extraido ?? d.analisis_ia ?? '').slice(0, MAX_DOC_CHARS);
+      return `### [${d.categoria}] ${d.nombre_original}\n${contenido}`;
+    }).join('\n\n---\n\n');
 
     const resumenEntrevistas = entrevistas.map(e =>
-      `### Entrevista: ${e.participante ?? 'Sin nombre'} (${e.cargo ?? ''})\n${(e.transcripcion ?? '').slice(0, 1500)}`
+      `### Entrevista: ${e.participante ?? 'Sin nombre'} (${e.cargo ?? ''})\n${(e.transcripcion ?? '').slice(0, MAX_ENTREV_CHARS)}`
     ).join('\n\n---\n\n');
 
     const resumenPreguntas = preguntas.filter(p => p.respuesta).map(p =>
@@ -1993,9 +2028,16 @@ CUESTIONARIO NORMATIVO RESPONDIDO:
 ${resumenPreguntas || 'Sin respuestas en el cuestionario.'}`;
 
     const rawResponse = await geminiAnalizar(prompt);
-    const clean  = rawResponse.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
-    const result = JSON.parse(clean);
-    res.json(result);
+    const { parsed: result, raw } = parseJsonFromGemini(rawResponse);
+    if (result) {
+      return res.json(result);
+    }
+    const clean = raw.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+    try {
+      res.json(JSON.parse(clean));
+    } catch (_) {
+      res.status(500).json({ error: 'La IA no devolvió JSON válido. Intenta de nuevo.' });
+    }
   } catch (err) {
     console.error('[triangular]', err.message);
     res.status(500).json({ error: err.message });
@@ -2957,13 +2999,24 @@ async function asegurarSnapshotDesdeAlcance(diagId) {
   return alcance.length;
 }
 
-// GET /api/diagnosticos/:id/questions - Obtener preguntas para Fase 6 (Auditoría Experta). Si hay snapshot (alcance confirmado), solo devuelve esas preguntas.
-app.get('/api/diagnosticos/:id/questions', verificarToken, async (req, res) => {
-  const diagId = parseInt(req.params.id);
+// GET /api/diagnosticos/:id/questions y /preguntas-para-ia - Obtener preguntas para Fase 6 (Auditoría Experta). Si hay snapshot (alcance confirmado), solo devuelve esas preguntas.
+app.get(['/api/diagnosticos/:id/questions', '/api/diagnosticos/:id/preguntas-para-ia'], verificarToken, async (req, res) => {
+  res.setTimeout(120000); // 2 min: carga de muchas evidencias/documentos
+  console.log('[DEBUG] Petición recibida en Fase 6 para ID:', req.params.id);
+  const diagId = parseInt(req.params.id, 10);
   const { complexity } = req.query;
 
   try {
+    if (!Number.isFinite(diagId)) {
+      return res.status(400).json({ error: 'ID de diagnóstico inválido', detalle: 'Se esperaba un número.' });
+    }
+    const { rows: [diagExists] } = await pool.query('SELECT id FROM diagnosticos WHERE id = $1', [diagId]);
+    if (!diagExists) {
+      return res.status(404).json({ error: 'Diagnóstico no encontrado', detalle: `No existe diagnóstico con id ${diagId}.` });
+    }
+
     let snapshot = await getPreguntasSnapshot(diagId);
+    if (!Array.isArray(snapshot)) snapshot = [];
 
     // Si no hay snapshot pero sí hay alcance en diagnostico_respuestas, crearlo ahora (fallback por si no se pulsó "Confirmar alcance")
     if (snapshot.length === 0) {
@@ -2984,24 +3037,38 @@ app.get('/api/diagnosticos/:id/questions', verificarToken, async (req, res) => {
       );
       const hitlByPreg = Object.fromEntries(hitlRows.map((r) => [Number(r.pregunta_id), r]));
 
-      const { rows: docs } = await pool.query(
-        `SELECT id, nombre_original, categoria, texto_extraido, analisis_ia, estado, calificaciones
+      // Protección de memoria: limitar tamaño de texto cargado desde BD (evitar saturar RAM en Render).
+      const { rows: docsRows } = await pool.query(
+        `SELECT id, nombre_original, categoria,
+                LEFT(COALESCE(texto_extraido, ''), 2000) AS texto_extraido,
+                LEFT(COALESCE(analisis_ia, ''), 2000) AS analisis_ia,
+                estado, calificaciones
          FROM diagnostico_documentos WHERE diagnostico_id = $1 AND estado = 'Analizado'`,
         [diagId]
       );
+      const docs = Array.isArray(docsRows) ? docsRows : [];
 
-      // Evidencias por pregunta en una sola pasada (evitar N+1)
-      const { rows: todasEnt } = await pool.query(
-        `SELECT id, participante, cargo, transcripcion, analisis_ia, duracion_seg FROM diagnostico_entrevistas WHERE diagnostico_id = $1`,
+      const { rows: entRows } = await pool.query(
+        `SELECT id, participante, cargo,
+                LEFT(COALESCE(transcripcion, ''), 2000) AS transcripcion,
+                LEFT(COALESCE(analisis_ia, ''), 2000) AS analisis_ia,
+                duracion_seg FROM diagnostico_entrevistas WHERE diagnostico_id = $1`,
         [diagId]
       );
-      const { rows: todasRec } = await pool.query(
-        `SELECT id, area, categoria, observacion, hallazgo, analisis_ia FROM diagnostico_recorrido WHERE diagnostico_id = $1`,
+      const todasEnt = Array.isArray(entRows) ? entRows : [];
+
+      const { rows: recRows } = await pool.query(
+        `SELECT id, area, categoria,
+                LEFT(COALESCE(observacion, ''), 500) AS observacion,
+                LEFT(COALESCE(hallazgo, ''), 500) AS hallazgo,
+                LEFT(COALESCE(analisis_ia, ''), 2000) AS analisis_ia
+         FROM diagnostico_recorrido WHERE diagnostico_id = $1`,
         [diagId]
       );
+      const todasRec = Array.isArray(recRows) ? recRows : [];
 
-      const preguntasConEvidencia = snapshot.map((s, idx) => {
-        const elementoNombre = (s.elemento_psm_nombre || s.pregunta_texto?.slice(0, 50) || '').toLowerCase();
+      const preguntasConEvidencia = snapshot.map((s) => {
+        const elementoNombre = (s.elemento_psm_nombre || (s.pregunta_texto && String(s.pregunta_texto).slice(0, 50)) || '').toLowerCase();
         const evidencia_documentos = docs
           .filter((d) => {
             const cals = Array.isArray(d.calificaciones) ? d.calificaciones : [];
@@ -3011,13 +3078,13 @@ app.get('/api/diagnosticos/:id/questions', verificarToken, async (req, res) => {
             const texto = (d.texto_extraido || '').toLowerCase();
             return elementoNombre && (analisis.includes(elementoNombre.slice(0, 25)) || texto.includes(elementoNombre.slice(0, 25)));
           })
-          .map((d) => ({ id: d.id, tipo: 'documento', fuente: d.nombre_original, categoria: d.categoria, fragmento: (d.texto_extraido || '').slice(0, 300), analisis: d.analisis_ia, estado: d.estado }));
+          .map((d) => ({ id: d.id, tipo: 'documento', fuente: d.nombre_original || '', categoria: d.categoria || '', fragmento: (d.texto_extraido || '').slice(0, 300), analisis: (d.analisis_ia || '').slice(0, 500), estado: d.estado || '' }));
         const evidencia_entrevistas = todasEnt
           .filter((e) => (e.analisis_ia || '').toLowerCase().includes(elementoNombre.slice(0, 25)) || (e.transcripcion || '').toLowerCase().includes(elementoNombre.slice(0, 25)))
-          .map((e) => ({ id: e.id, tipo: 'entrevista', fuente: e.participante || 'Sin nombre', cargo: e.cargo, fragmento: (e.transcripcion || '').slice(0, 300), analisis: e.analisis_ia, duracion: e.duracion_seg }));
+          .map((e) => ({ id: e.id, tipo: 'entrevista', fuente: e.participante || 'Sin nombre', cargo: e.cargo || '', fragmento: (e.transcripcion || '').slice(0, 300), analisis: (e.analisis_ia || '').slice(0, 500), duracion: e.duracion_seg }));
         const evidencia_campo = todasRec
           .filter((r) => (r.analisis_ia || '').toLowerCase().includes(elementoNombre.slice(0, 25)) || (r.observacion || '').toLowerCase().includes(elementoNombre.slice(0, 25)) || (r.hallazgo || '').toLowerCase().includes(elementoNombre.slice(0, 25)))
-          .map((r) => ({ id: r.id, tipo: 'recorrido', fuente: r.area || 'Sin área', categoria: r.categoria, fragmento: (r.observacion || r.hallazgo || '').slice(0, 300), analisis: r.analisis_ia }));
+          .map((r) => ({ id: r.id, tipo: 'recorrido', fuente: r.area || 'Sin área', categoria: r.categoria || '', fragmento: (r.observacion || r.hallazgo || '').slice(0, 300), analisis: (r.analisis_ia || '').slice(0, 500) }));
         const vh = hitlByPreg[Number(s.pregunta_id)] || {};
         const p = {
           id: s.pregunta_id,
@@ -3064,14 +3131,14 @@ app.get('/api/diagnosticos/:id/questions', verificarToken, async (req, res) => {
     const complejidadMap = { 1: [1], 2: [1, 2], 3: [1, 2, 3], 4: [1, 2, 3, 4], 5: [1, 2, 3, 4, 5] };
     const complejidadesPermitidas = complejidadMap[nivelFiltro] || [1, 2];
 
-    const { rows: preguntas } = await pool.query(`
+    const { rows: preguntasRows } = await pool.query(`
       SELECT
         p.id, p.complejidad, p.elemento, p.pregunta,
         p.evidencia_suficiente, p.evidencia_escasa, p.evidencia_al_menos, p.evidencia_no_evidencia,
         COALESCE((
           SELECT jsonb_agg(jsonb_build_object(
             'id', dd.id, 'tipo', 'documento', 'fuente', dd.nombre_original, 'categoria', dd.categoria,
-            'fragmento', LEFT(COALESCE(dd.texto_extraido, ''), 300), 'analisis', dd.analisis_ia, 'estado', dd.estado
+            'fragmento', LEFT(COALESCE(dd.texto_extraido, ''), 300), 'analisis', LEFT(COALESCE(dd.analisis_ia, ''), 500), 'estado', dd.estado
           ))
           FROM diagnostico_documentos dd
           WHERE dd.diagnostico_id = $1 AND dd.estado = 'Analizado'
@@ -3100,6 +3167,7 @@ app.get('/api/diagnosticos/:id/questions', verificarToken, async (req, res) => {
       ORDER BY p.complejidad ASC, p.elemento ASC
     `, [diagId, complejidadesPermitidas]);
 
+    const preguntas = Array.isArray(preguntasRows) ? preguntasRows : [];
     res.json({
       diagnostico_id: diagId,
       nivel_complejidad: nivelFiltro,
@@ -3116,8 +3184,13 @@ app.get('/api/diagnosticos/:id/questions', verificarToken, async (req, res) => {
       })),
     });
   } catch (error) {
-    console.error('[Fase5] Error obteniendo preguntas:', error);
-    res.status(500).json({ error: 'Error interno del servidor' });
+    console.error('ERROR CRÍTICO EN QUESTIONS:', error);
+    if (!res.headersSent) {
+      res.status(500).json({
+        error: 'Error interno en el servidor',
+        detalle: error && typeof error.message === 'string' ? error.message : String(error),
+      });
+    }
   }
 });
 

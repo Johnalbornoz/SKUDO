@@ -5,8 +5,8 @@ const API_URL = (import.meta.env.PROD
 
 export const API_BASE_URL = API_URL;
 
-/** Timeout para operaciones que usan IA (triangulación Fase 5, pronóstico). Debe ser < timeout del servidor (120s). */
-const TIMEOUT_IA_MS = 115000;
+/** Timeout para operaciones que usan IA (triangulación, análisis docs, preguntas Fase 6, pronóstico). 2 min para coincidir con res.setTimeout(120000) del backend. */
+const TIMEOUT_IA_MS = 120000;
 
 function getToken() {
   return localStorage.getItem('skudo_token');
@@ -261,7 +261,7 @@ const apiService = {
   },
 
   async triangularDiagnostico(diagId) {
-    return http(`${API_URL}/diagnosticos/${diagId}/triangular`, { method: 'POST' });
+    return httpLong(`${API_URL}/diagnosticos/${diagId}/triangular`, { method: 'POST' });
   },
 
   async fetchDocumentos(diagId, categoria = null) {
@@ -270,7 +270,7 @@ const apiService = {
   },
 
   async analizarDocumento(diagId, docId) {
-    return http(`${API_URL}/diagnosticos/${diagId}/documentos/${docId}/analizar`, { method: 'POST' });
+    return httpLong(`${API_URL}/diagnosticos/${diagId}/documentos/${docId}/analizar`, { method: 'POST' });
   },
 
   async eliminarDocumento(diagId, docId) {
@@ -367,18 +367,34 @@ const apiService = {
   // 🔍 FASE 5: AUDITORÍA EXPERTA CON TRIANGULACIÓN DE EVIDENCIAS
   // ═══════════════════════════════════════════════════════════════════════════════
 
-  // Obtener preguntas filtradas por complejidad para Fase 5. cacheBust evita respuestas en caché tras validar todas.
+  // Obtener preguntas filtradas por complejidad para Fase 5/6. Timeout largo por carga de muchas evidencias. cacheBust evita respuestas en caché tras validar todas.
   async fetchPreguntasFase5(diagnosticoId, complexity = null, cacheBust = false) {
     let url = complexity
       ? `${API_URL}/diagnosticos/${diagnosticoId}/questions?complexity=${complexity}`
       : `${API_URL}/diagnosticos/${diagnosticoId}/questions`;
     if (cacheBust) url += (url.includes('?') ? '&' : '?') + '_t=' + Date.now();
-    const response = await fetch(url, {
-      headers: authHeaders(),
-      cache: cacheBust ? 'no-store' : 'default',
-    });
-    if (!response.ok) throw new Error(await response.text());
-    return response.json();
+    const controller = new AbortController();
+    const to = setTimeout(() => controller.abort(), TIMEOUT_IA_MS);
+    try {
+      const response = await fetch(url, {
+        headers: authHeaders(),
+        cache: cacheBust ? 'no-store' : 'default',
+        signal: controller.signal,
+      });
+      clearTimeout(to);
+      if (response.status === 401) {
+        localStorage.removeItem('skudo_token');
+        localStorage.removeItem('skudo_usuario');
+        window.location.reload();
+        throw new Error('Sesión expirada');
+      }
+      if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error || `Error ${response.status}`);
+      return response.json();
+    } catch (err) {
+      clearTimeout(to);
+      if (err.name === 'AbortError') throw new Error('El servidor está procesando la solicitud (puede tardar 1–2 min). Espera e intenta de nuevo.');
+      throw err;
+    }
   },
 
   // Validar pregunta en Fase 5 (HITL) – servidor consulta BD y puede usar IA; timeout largo
